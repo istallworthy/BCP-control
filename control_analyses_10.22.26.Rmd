@@ -1,0 +1,2722 @@
+---
+title: "control_analyes"
+output: html_document
+date: "2025-08-21"
+---
+
+A workbook for conducting control analyses on the Baby Connectome Project (BCP). 
+
+```{r setup, include=FALSE}
+knitr::opts_chunk$set(echo = TRUE)
+```
+
+## R Markdown
+
+Libraries
+```{r}
+library(dplyr)
+library(lmerTest)
+library(ggplot2)
+library(readr)
+library(readxl)
+library(tidyr)
+library(reshape2)
+library(interactions)
+library(ggnewscale)
+library(ggseg)
+library(ggsegSchaefer)
+```
+
+
+# Read in data
+## Demo
+```{r}
+dat <- read.csv("/Users/isabella/Library/CloudStorage/Box-Box/UMN/Postdoc/Control/Demographics/all_data_shell_12.12.csv")
+
+demo <- dat %>%
+  dplyr::select(id, session, gestational_age_days, sex, Scan_Age, site_shell)
+demo$session <- round(demo$session, 0)
+
+race <- dat %>%
+  dplyr::select(id, session, race)
+                
+home_dir <- "/Users/isabella/Library/CloudStorage/Box-Box/UMN/Postdoc/Control/Data"
+
+qc <- read_xlsx ("/Users/isabella/Library/CloudStorage/Box-Box/UMN/Postdoc/Control/QC_Tracking_05.18.25.xlsx")
+qc <- qc[1:470, ]
+
+qc <- qc %>% select(c(id = ID, session = Session, Exclude))%>% 
+  mutate(id = gsub("_", "-", id)) %>%
+  mutate(id = as.numeric(gsub("sub-", "", id))) %>%
+  mutate(session = gsub("_", "-", session)) %>%
+  mutate(session = gsub("ses-", "", session)) %>%
+  mutate(session = gsub("mo_", "", session)) %>%
+  mutate(session = gsub("mo", "", session)) 
+qc$q <- ifelse(is.na(qc$Exclude), 0, 1)
+qc$Exclude <- NULL
+
+
+labels <- read.table("/Users/isabella/Library/CloudStorage/Box-Box/UMN/Postdoc/Control/DSI_studio/atlas-Schaefer2018v0143_desc-100ParcelsAllNetworks_dseg.tsv",
+                     header = TRUE)
+labels_17 <- labels[, c(5, 2, 3, 6)]
+labels <- labels[, c(1:4)]
+
+names(labels) <- c("node", "label", "network", "region")
+names(labels_17) <- c("node", "label", "network", "region")
+
+fig_dir <- "/Users/isabella/Library/CloudStorage/Box-Box/UMN/Postdoc/Control/figures/"
+
+
+network_colors <- c(
+  "Vis"  = "#003F5C",  # navy
+  "Som"  = "#7A1E1E",  # dark crimson
+  "DorsAttn"  = "#1B5E20",  # forest green
+  "SalVentAttn"  = "#4A2C6D",  # deep violet
+  "Lim"  = "#8C510A",  # brown-gold
+  "Cont"   = "#2F2F2F",  # dark gray
+  "DMN"  = "#2C3E91"   # royal blue
+)
+
+other_colors <- c(
+  "Lang" = "#8B3A62",
+  "Soc Cog" = "#0B6E6E"
+)
+```
+
+
+
+## Behavior
+
+Vrrsb
+```{r}
+# vrrsb
+beh_dir <- "/Users/isabella/Library/CloudStorage/Box-Box/UMN/Postdoc/Control/Behavior"
+
+vrrsb <- read_beh(beh_dir = beh_dir, file = "vrrsb01.txt", 
+                  cols = list(videorefscore = "videorefscore",
+                              socialcomm = "socialcomm",
+                              rsbtotal = "rsbtotal"))%>%
+  pivot_longer(cols = -c(id, age),
+               names_to  = "item",
+               values_to = "score") %>%
+  mutate(measure = "VRRSB") 
+
+
+vrrsb <- read_beh(beh_dir = beh_dir, file = "vrrsb01.txt", 
+                  cols = list(videorefscore = "videorefscore",
+                              rsbtotal = "rsbtotal"))
+
+vrrsb_avg <- vrrsb %>%
+  group_by(id) %>%
+  summarize(vr_age = mean(age, na.rm = TRUE),
+            videorefscore_mean = mean(videorefscore, na.rm = TRUE),
+            rsbtotal_mean = mean(rsbtotal))
+
+```
+
+
+
+Mullen
+```{r}
+
+mullen <- readRDS(file.path(home_dir, "mullen_03.rds"))
+
+mullen <- mullen %>% select(id  = src_subject_id,
+                            age = interview_age,
+                            fm_ae = scoresumm_fm_t_score,
+                            gm_ae = scoresumm_gm_t_score,
+                            rl_ae = scoresumm_rl_t_score,
+                            el_ae = scoresumm_el_t_score)
+mullen[, 3:ncol(mullen)][mullen[, 3:ncol(mullen)] > 700] = NA
+mullen <- mullen[!duplicated(paste0(mullen$id, mullen$age)), ]
+
+
+
+summary(mullen$age)
+length(unique(mullen$id))
+
+```
+
+Mefs
+```{r}
+
+beh_dir <- "/Users/isabella/Library/CloudStorage/Box-Box/UMN/Postdoc/Control/Behavior"
+
+mefes <- read_beh(beh_dir = beh_dir, file = "mefs01.txt", 
+                  cols = list(standard_score = "standard_score"
+                  )) 
+summary(mefes %>% pull(age))
+
+mefes_avg <- mefes %>%
+  group_by(id) %>%
+  arrange(age) %>%
+  group_by(id) %>%
+  summarize(
+            standard_score_mean2 = first(standard_score))
+
+
+summary(mefes %>%
+  group_by(id) %>%
+  arrange(age) %>%
+  group_by(id) %>%
+  summarize(age= first(age)) %>% pull(age))
+
+```
+
+
+
+
+# Matrices
+
+Plot matrices
+```{r}
+
+mat_dir <- "/Users/isabella/Library/CloudStorage/Box-Box/UMN/Postdoc/Control/matrices/matrices_csv"
+mats <- dir(mat_dir, "*.csv")
+
+p_dir <- "/Users/isabella/Library/CloudStorage/Box-Box/UMN/Postdoc/Control/matrices/plots"
+
+for (m in mats){
+  id <- sapply(strsplit(m, "_ses"), "[", 1)
+   ses <- gsub("[^0-9.]", "", sapply(strsplit(m, "_"), "[", 2))
+  mat <- read.csv(file.path(mat_dir, m))
+  mat <- as.matrix(mat[1:100, 1:100])
+  rownames(mat) <- colnames(mat) <- 1:100
+  
+  mat_melt <- melt(mat)
+  
+    nodes <- sort(unique(c(mat_melt$Var1, mat_melt$Var2)))
+  n <- length(nodes)
+  
+  # total possible undirected edges (no self-loops)
+  total_possible <- n * (n - 1) / 2
+  
+  pct_nonzero <- round((sum(mat_melt$value > 0) / total_possible)*100, 0)
+  
+  network_labels <- data.frame(
+    parcel = unique(mat_melt$Var1),
+    network = labels$network)
+  
+  mat_melt <- mat_melt %>%
+    left_join(network_labels, by = c("Var1" = "parcel")) %>%
+    left_join(network_labels, by = c("Var2" = "parcel"), suffix = c("_x", "_y"))
+  
+
+
+  
+  net_colors = network_colors
+  
+  # Plot matrix with bottom and left network bars
+  ggplot(mat_melt, aes(Var1, Var2, fill = value)) +
+    geom_tile() +
+    scale_fill_viridis_c() +
+    coord_equal(expand = FALSE) +
+    theme_minimal(base_size = 12) +
+    theme(
+      axis.text.x = element_text(angle = 45, hjust = 1, size = 10),
+      axis.text.y = element_text(size = 10),
+      axis.title = element_blank(),
+      panel.grid = element_blank(),
+      legend.position = "right"
+    ) +
+    new_scale_fill() +
+    # Bottom bar (was top)
+    geom_tile(
+      aes(x = Var1, y = 0, fill = network_x),
+      height = 1.5  # controls thickness
+    ) +
+    # Left bar
+    geom_tile(
+      aes(x = 0, y = Var2, fill = network_y),
+      width = 1.5  # controls thickness
+    ) +
+    scale_fill_manual(values = net_colors, name = "Network") +
+    coord_equal(expand = FALSE) +
+    ggtitle(sprintf("%s session %s (perc nonzero = %s)", id, ses, pct_nonzero))
+  
+  ggsave(file.path(p_dir, sprintf("%s_%s.jpeg", id, ses)))
+}
+
+```
+
+
+
+# Read in transitions control
+Dorsal attention
+```{r}
+tran_dir <- "/Users/isabella/Library/CloudStorage/Box-Box/UMN/Postdoc/Control/nctpy/transitions_results_DorsAttn"
+
+all_trans_dorsa <- data.frame()
+for (t in dir(tran_dir)){
+  dat <- jsonlite::fromJSON(file.path(tran_dir, t))
+  dat <- cbind(data.frame(id = names(dat), 
+                          ses = sapply(strsplit(t, "_"), "[", 2), node = 1:100), data.frame(dat[[1]]))
+  all_trans_dorsa <- rbind(all_trans_dorsa, dat)
+  rm(dat)
+}
+
+all_trans_dorsa <- merge(all_trans_dorsa, labels, by = "node", all.x = TRUE)
+all_trans_dorsa$id <- gsub("sub-", "", all_trans_dorsa$id)
+all_trans_dorsa$id <- as.integer(all_trans_dorsa$id)
+all_trans_dorsa$session <- as.numeric(stringr::str_extract_all(all_trans_dorsa$ses , "\\d+"))
+all_trans_dorsa <- merge(all_trans_dorsa, demo, by = c("id", "session"), all.x = TRUE)
+all_trans_dorsa$energy <- as.numeric(all_trans_dorsa$energy)
+
+all_trans_dorsa$age <- round(all_trans_dorsa$Scan_Age, 0)
+
+all_trans_dorsa <- all_trans_dorsa %>%
+  arrange(id, session, node)
+all_trans_dorsa$energy_log <- log1p(all_trans_dorsa$energy)
+
+ggplot(aes(x = network, y = energy_log), data = all_trans_dorsa) +
+  geom_jitter(aes( color = network), alpha = 0.4) +
+     geom_violin() +
+    stat_summary(fun = median, geom = "crossbar", 
+               width = 0.5, color = "black", 
+               fatten = 2, size = 0.6) +
+  ylab("Energy (log)") +
+  theme_minimal() +
+  ggtitle("Total Energy Required to Activate dorsa State")
+ggsave(file.path(fig_dir, "dorsa_energy_vio.jpeg"))
+
+all_trans_dorsa_split <- all_trans_dorsa %>%
+  group_by(id, session, network) %>%
+  summarize(total_energy = sum(energy))
+all_trans_dorsa_split <- merge(all_trans_dorsa_split, demo, by = c("id", "session"), all.x = TRUE)
+
+
+all_trans_dorsa <- all_trans_dorsa %>%
+  group_by(id, session) %>%
+  summarize(total_energy = mean(total_energy))
+
+all_trans_dorsa <- merge(all_trans_dorsa, qc, by = c("id", "session"), all.x = TRUE)
+all_trans_dorsa$q[is.na(all_trans_dorsa$q)] <- 0
+
+
+
+all_trans_dorsa <- merge(all_trans_dorsa, demo, by = c("id", "session"), all.x = TRUE)
+
+
+```
+
+
+Visual  
+```{r}
+tran_dir <- "/Users/isabella/Library/CloudStorage/Box-Box/UMN/Postdoc/Control/nctpy/transitions_results_Vis"
+
+all_trans_vis <- data.frame()
+for (t in dir(tran_dir)){
+  dat <- jsonlite::fromJSON(file.path(tran_dir, t))
+  dat <- cbind(data.frame(id = names(dat), 
+                          ses = sapply(strsplit(t, "_"), "[", 2), node = 1:100), data.frame(dat[[1]]))
+  all_trans_vis <- rbind(all_trans_vis, dat)
+  rm(dat)
+}
+
+all_trans_vis <- merge(all_trans_vis, labels, by = "node", all.x = TRUE)
+all_trans_vis$id <- gsub("sub-", "", all_trans_vis$id)
+all_trans_vis$id <- as.integer(all_trans_vis$id)
+all_trans_vis$session <- as.numeric(stringr::str_extract_all(all_trans_vis$ses , "\\d+"))
+all_trans_vis <- merge(all_trans_vis, demo, by = c("id", "session"), all.x = TRUE)
+all_trans_vis$energy <- as.numeric(all_trans_vis$energy)
+
+
+all_trans_vis$age <- round(all_trans_vis$Scan_Age, 0)
+
+all_trans_vis <- all_trans_vis %>%
+  arrange(id, session, node)
+all_trans_vis$energy_log <- log1p(all_trans_vis$energy)
+
+ggplot(aes(x = network, y = energy_log), data = all_trans_vis) +
+  geom_jitter(aes( color = network), alpha = 0.4) +
+     geom_violin() +
+    stat_summary(fun = median, geom = "crossbar", 
+               width = 0.5, color = "black", 
+               fatten = 2, size = 0.6) +
+  ylab("Energy (log)") +
+  theme_minimal() +
+  ggtitle("Total Energy Required to Activate vis State")
+ggsave(file.path(fig_dir, "vis_energy_vio.jpeg"))
+
+
+all_trans_vis <- all_trans_vis %>%
+  group_by(id, session) %>%
+  summarize(total_energy = mean(total_energy))
+all_trans_vis <- merge(all_trans_vis, demo, by = c("id", "session"), all.x = TRUE)
+
+all_trans_vis <- merge(all_trans_vis, qc, by = c("id", "session"), all.x = TRUE)
+all_trans_vis$q[is.na(all_trans_vis$q)] <- 0
+
+```
+
+Somatomotor 
+```{r}
+tran_dir <- "/Users/isabella/Library/CloudStorage/Box-Box/UMN/Postdoc/Control/nctpy/transitions_results_SomMot"
+
+all_trans_som <- data.frame()
+for (t in dir(tran_dir)){
+  dat <- jsonlite::fromJSON(file.path(tran_dir, t))
+  dat <- cbind(data.frame(id = names(dat), 
+                          ses = sapply(strsplit(t, "_"), "[", 2), node = 1:100), data.frame(dat[[1]]))
+  all_trans_som <- rbind(all_trans_som, dat)
+  rm(dat)
+}
+
+all_trans_som <- merge(all_trans_som, labels, by = "node", all.x = TRUE)
+all_trans_som$id <- gsub("sub-", "", all_trans_som$id)
+all_trans_som$id <- as.integer(all_trans_som$id)
+all_trans_som$session <- as.numeric(stringr::str_extract_all(all_trans_som$ses , "\\d+"))
+all_trans_som <- merge(all_trans_som, demo, by = c("id", "session"), all.x = TRUE)
+all_trans_som$energy <- as.numeric(all_trans_som$energy)
+
+all_trans_som$age <- round(all_trans_som$Scan_Age, 0)
+
+all_trans_som <- all_trans_som %>%
+  arrange(id, session, node)
+all_trans_som$energy_log <- log1p(all_trans_som$energy)
+
+
+# nodel level age cors
+age_cor_by_net <- all_trans_som %>%
+  group_by(node) %>%
+  summarize(
+    age_cor = cor(Scan_Age, energy, use = "pairwise.complete.obs"),
+    n = sum(complete.cases(Scan_Age, energy)),
+    .groups = "drop"
+  )
+hist(age_cor_by_net$age_cor)
+km <- kmeans(age_cor_by_net$age_cor, centers = 2)
+age_cor_by_net <- data.frame(
+  value   = age_cor_by_net,
+  cluster = factor(km$cluster)
+)
+age_cor_by_net <- merge(age_cor_by_net, labels %>% select(value.node = node, network), all.x = TRUE)
+age_cor_by_net <- age_cor_by_net %>%
+  mutate(som = ifelse(network == "SomMot", 1, 0))
+ggplot(aes(x = value.node, y = value.age_cor, color = factor(cluster)), data = age_cor_by_net) +
+  geom_point(aes(shape = factor(som))) +
+  geom_hline(yintercept = 0, color = "black") +
+  theme_minimal() +
+  xlab("Node") +
+  ylab("Age Correlation") +
+  labs(color = "Cluster")
+
+
+ggplot(aes(x = network, y = energy_log), data = all_trans_som) +
+  geom_jitter(aes( color = network), alpha = 0.4) +
+     geom_violin() +
+    stat_summary(fun = median, geom = "crossbar", 
+               width = 0.5, color = "black", 
+               fatten = 2, size = 0.6) +
+  ylab("Energy (log)") +
+  theme_minimal() +
+  ggtitle("Total Energy Required to Activate SomMot State")
+ggsave(file.path(fig_dir, "som_energy_vio.jpeg"))
+
+
+all_trans_som <- all_trans_som %>%
+  group_by(id, session) %>%
+  summarize(total_energy = mean(total_energy))
+all_trans_som <- merge(all_trans_som, demo, by = c("id", "session"), all.x = TRUE)
+
+all_trans_som <- merge(all_trans_som, qc, by = c("id", "session"), all.x = TRUE)
+all_trans_som$q[is.na(all_trans_som$q)] <- 0
+
+```
+
+
+Language
+```{r}
+tran_dir <- "/Users/isabella/Library/CloudStorage/Box-Box/UMN/Postdoc/Control/nctpy/transitions_results_Lang"
+
+all_trans_lang <- data.frame()
+for (t in dir(tran_dir)){
+  dat <- jsonlite::fromJSON(file.path(tran_dir, t))
+  dat <- cbind(data.frame(id = names(dat), 
+                          ses = sapply(strsplit(t, "_"), "[", 2), node = 1:100), data.frame(dat[[1]]))
+  all_trans_lang <- rbind(all_trans_lang, dat)
+  rm(dat)
+}
+
+all_trans_lang <- merge(all_trans_lang, labels, by = "node", all.x = TRUE)
+all_trans_lang$id <- gsub("sub-", "", all_trans_lang$id)
+all_trans_lang$id <- as.integer(all_trans_lang$id)
+all_trans_lang$session <- as.numeric(stringr::str_extract_all(all_trans_lang$ses , "\\d+"))
+all_trans_lang <- merge(all_trans_lang, demo, by = c("id", "session"), all.x = TRUE)
+all_trans_lang$energy <- as.numeric(all_trans_lang$energy)
+
+all_trans_lang$age <- round(all_trans_lang$Scan_Age, 0)
+
+all_trans_lang <- all_trans_lang %>%
+  arrange(id, session, node)
+
+all_trans_lang <- all_trans_lang %>%
+  group_by(id, session) %>%
+  summarize(total_energy = mean(total_energy))
+all_trans_lang <- merge(all_trans_lang, demo, by = c("id", "session"), all.x = TRUE)
+
+all_trans_lang <- merge(all_trans_lang, qc, by = c("id", "session"), all.x = TRUE)
+all_trans_lang$q[is.na(all_trans_lang$q)] <- 0
+
+
+```
+Ment
+
+```{r}
+# this is soc cog
+tran_dir <- "/Users/isabella/Library/CloudStorage/Box-Box/UMN/Postdoc/Control/nctpy/transitions_results_Ment"
+
+all_trans_ment <- data.frame()
+for (t in dir(tran_dir)){
+  dat <- jsonlite::fromJSON(file.path(tran_dir, t))
+  dat <- cbind(data.frame(id = names(dat), 
+                          ses = sapply(strsplit(t, "_"), "[", 2), node = 1:100), data.frame(dat[[1]]))
+  all_trans_ment <- rbind(all_trans_ment, dat)
+  rm(dat)
+}
+
+all_trans_ment <- merge(all_trans_ment, labels, by = "node", all.x = TRUE)
+all_trans_ment$id <- gsub("sub-", "", all_trans_ment$id)
+all_trans_ment$id <- as.integer(all_trans_ment$id)
+all_trans_ment$session <- as.numeric(stringr::str_extract_all(all_trans_ment$ses , "\\d+"))
+all_trans_ment <- merge(all_trans_ment, demo, by = c("id", "session"), all.x = TRUE)
+all_trans_ment$energy <- as.numeric(all_trans_ment$energy)
+
+all_trans_ment$age <- round(all_trans_ment$Scan_Age, 0)
+
+all_trans_ment <- all_trans_ment %>%
+  arrange(id, session, node)
+all_trans_ment$energy_log <- log1p(all_trans_ment$energy)
+
+# nodel level age cors
+age_cor_by_net <- all_trans_ment %>%
+  group_by(node) %>%
+  summarize(
+    age_cor = cor(Scan_Age, energy, use = "pairwise.complete.obs"),
+    n = sum(complete.cases(Scan_Age, energy)),
+    .groups = "drop"
+  )
+hist(age_cor_by_net$age_cor)
+km <- kmeans(age_cor_by_net$age_cor, centers = 2)
+age_cor_by_net <- data.frame(
+  value   = age_cor_by_net,
+  cluster = factor(km$cluster)
+)
+age_cor_by_net <- merge(age_cor_by_net, labels %>% select(value.node = node, label = region), all.x = TRUE)
+soc <- read.table("/Users/isabella/Library/CloudStorage/Box-Box/UMN/Postdoc/Control/nctpy/social cognition/schaefer_socialcog_overlap.txt",
+                  header = TRUE)
+age_cor_by_net <- age_cor_by_net %>%
+  mutate(soc = ifelse(label %in% soc$label, 1, 0))
+ggplot(aes(x = value.node, y = value.age_cor, color = factor(cluster)), data = age_cor_by_net) +
+  geom_point(aes(shape = factor(soc))) +
+  geom_hline(yintercept = 0, color = "black") +
+  theme_minimal() +
+  xlab("Node") +
+  ylab("Age Correlation") +
+  labs(color = "Cluster") 
+
+ggplot(aes(x = network, y = energy_log), data = all_trans_ment) +
+  geom_jitter(aes( color = network), alpha = 0.4) +
+     geom_violin() +
+    stat_summary(fun = median, geom = "crossbar", 
+               width = 0.5, color = "black", 
+               fatten = 2, size = 0.6) +
+  ylab("Energy (log)") +
+  theme_minimal() +
+  ggtitle("Total Energy Required to Activate ment State")
+ggsave(file.path(fig_dir, "ment_energy_vio.jpeg"))
+
+
+all_trans_ment <- all_trans_ment %>%
+  group_by(id, session) %>%
+  summarize(total_energy = mean(total_energy))
+all_trans_ment <- merge(all_trans_ment, demo, by = c("id", "session"), all.x = TRUE)
+
+all_trans_ment <- merge(all_trans_ment, qc, by = c("id", "session"), all.x = TRUE)
+all_trans_ment$q[is.na(all_trans_ment$q)] <- 0
+
+```
+
+DMN
+```{r}
+tran_dir <- "/Users/isabella/Library/CloudStorage/Box-Box/UMN/Postdoc/Control/nctpy/transitions_results_Default"
+
+all_trans_dmn <- data.frame()
+for (t in dir(tran_dir)){
+  dat <- jsonlite::fromJSON(file.path(tran_dir, t))
+  dat <- cbind(data.frame(id = names(dat), 
+                          ses=sapply(strsplit(t, "_"), "[", 2), node = 1:100), data.frame(dat[[1]]))
+  all_trans_dmn <- rbind(all_trans_dmn, dat)
+  rm(dat)
+}
+
+all_trans_dmn <- merge(all_trans_dmn, labels, by = "node", all.x = TRUE)
+all_trans_dmn$id <- gsub("sub-", "", all_trans_dmn$id)
+all_trans_dmn$id <- as.integer(all_trans_dmn$id)
+all_trans_dmn$session <- as.numeric(stringr::str_extract_all(all_trans_dmn$ses , "\\d+"))
+all_trans_dmn <- merge(all_trans_dmn, demo, by = c("id", "session"), all.x = TRUE)
+all_trans_dmn$energy <- as.numeric(all_trans_dmn$energy)
+
+all_trans_dmn$age <- round(all_trans_dmn$Scan_Age, 0)
+
+all_trans_dmn <- all_trans_dmn %>%
+  arrange(id, session, node)
+
+# nodel level age cors
+age_cor_by_net <- all_trans_dmn %>%
+  group_by(node) %>%
+  summarize(
+    age_cor = cor(Scan_Age, energy, use = "pairwise.complete.obs"),
+    n = sum(complete.cases(Scan_Age, energy)),
+    .groups = "drop"
+  )
+hist(age_cor_by_net$age_cor)
+km <- kmeans(age_cor_by_net$age_cor, centers = 2)
+age_cor_by_net <- data.frame(
+  value   = age_cor_by_net,
+  cluster = factor(km$cluster)
+)
+age_cor_by_net <- merge(age_cor_by_net, labels %>% select(value.node = node, network), all.x = TRUE)
+age_cor_by_net <- age_cor_by_net %>%
+  mutate(dmn = ifelse(network == "Default", 1, 0))
+ggplot(aes(x = value.node, y = value.age_cor, color = factor(cluster)), data = age_cor_by_net) +
+  geom_point(aes(shape = factor(dmn))) +
+  geom_hline(yintercept = 0, color = "black") +
+  theme_minimal() +
+  xlab("Node") +
+  ylab("Age Correlation") +
+  labs(color = "Cluster")
+
+all_trans_dmn <- all_trans_dmn %>%
+  group_by(id, session) %>%
+  summarize(total_energy = mean(total_energy))
+all_trans_dmn <- merge(all_trans_dmn, demo, by = c("id", "session"), all.x = TRUE)
+
+
+all_trans_dmn <- merge(all_trans_dmn, qc, by = c("id", "session"), all.x = TRUE)
+all_trans_dmn$q[is.na(all_trans_dmn$q)] <- 0
+```
+
+Salience
+```{r}
+tran_dir <- "/Users/isabella/Library/CloudStorage/Box-Box/UMN/Postdoc/Control/nctpy/transitions_results_SalVentAttn"
+
+all_trans_sal <- data.frame()
+for (t in dir(tran_dir)){
+  dat <- jsonlite::fromJSON(file.path(tran_dir, t))
+   dat <- cbind(data.frame(id = names(dat), 
+                          ses=sapply(strsplit(t, "_"), "[", 2), node = 1:100), data.frame(dat[[1]]))
+  all_trans_sal <- rbind(all_trans_sal, dat)
+  rm(dat)
+}
+
+all_trans_sal <- merge(all_trans_sal, labels, by = "node", all.x = TRUE)
+all_trans_sal$id <- gsub("sub-", "", all_trans_sal$id)
+all_trans_sal$id <- as.integer(all_trans_sal$id)
+all_trans_sal$session <- as.numeric(stringr::str_extract_all(all_trans_sal$ses , "\\d+"))
+all_trans_sal <- merge(all_trans_sal, demo, by = c("id", "session"), all.x = TRUE)
+all_trans_sal$energy <- as.numeric(all_trans_sal$energy)
+
+all_trans_sal$age <- round(all_trans_sal$Scan_Age, 0)
+
+all_trans_sal <- all_trans_sal %>%
+  arrange(id, session, node)
+
+# examining node-level groups
+ggplot(aes(x = Scan_Age, y = energy), data = all_trans_sal) +
+  geom_point() +
+  theme_minimal()
+
+
+# nodel level age cors
+age_cor_by_net <- all_trans_sal %>%
+  group_by(node) %>%
+  summarize(
+    age_cor = cor(Scan_Age, energy, use = "pairwise.complete.obs"),
+    n = sum(complete.cases(Scan_Age, energy)),
+    .groups = "drop"
+  )
+hist(age_cor_by_net$age_cor)
+km <- kmeans(age_cor_by_net$age_cor, centers = 2)
+age_cor_by_net <- data.frame(
+  value   = age_cor_by_net,
+  cluster = factor(km$cluster)
+)
+age_cor_by_net <- merge(age_cor_by_net, labels %>% select(value.node = node, network, label), all.x = TRUE)
+
+age_cor_by_net <- age_cor_by_net %>%
+  mutate(sal = ifelse(network == "SalVentAttn", 1, 0))
+
+
+labels$values <- NA
+
+
+
+labels2 <- merge(labels, age_cor_by_net %>% select(node = value.node, value.age_cor), by = "node", all.x = TRUE)
+labels$hemi <- ifelse(grepl("LH", labels$label), "left", "right")
+
+ggseg(.data = labels2 %>% select(-c(label)), atlas = schaefer7_100, 
+      mapping = aes(fill = value.age_cor, color = network), 
+      position = c("stacked")) + 
+  labs(fill="")
+
+
+
+
+
+all_trans_sal_wide <- all_trans_sal %>%
+  pivot_wider(names_from = node, 
+              values_from = energy,
+              id_cols = c("id", "session"))
+  
+all_trans_sal_wide <- all_trans_sal_wide[, 3:ncol(all_trans_sal_wide)]
+
+cor_mat <- cor(
+  all_trans_sal_wide,
+  use = "pairwise.complete.obs"
+)
+
+library(tidyverse)
+
+cor_df <- cor_mat %>%
+  as.data.frame() %>%
+  rownames_to_column("var1") %>%
+  pivot_longer(
+    -var1,
+    names_to  = "var2",
+    values_to = "r"
+  )
+
+ggplot(cor_df, aes(x = as.numeric(var1), y = as.numeric(var2), fill = r)) +
+  geom_tile(color = "white", linewidth = 0.3) +
+  scale_fill_gradient2(
+    low = "#4575b4",
+    mid = "white",
+    high = "#d73027",
+    midpoint = 0,
+    limits = c(-1, 1),
+    name = "r"
+  ) +
+  coord_fixed() +
+  theme_minimal(base_size = 10) +
+  theme(
+    axis.text.x = element_text(angle = 45, hjust = 1),
+    axis.title  = element_blank(),
+    panel.grid  = element_blank()
+  )
+
+all_trans_sal <- all_trans_sal %>%
+  group_by(id, session) %>%
+  summarize(total_energy = mean(total_energy))
+all_trans_sal <- merge(all_trans_sal, demo, by = c("id", "session"), all.x = TRUE)
+
+# all_trans_sal <- all_trans_sal %>%
+#   filter(paste(id, session, sep = "_") %in% keep$ID_session)
+
+all_trans_sal <- merge(all_trans_sal, qc, by = c("id", "session"), all.x = TRUE)
+all_trans_sal$q[is.na(all_trans_sal$q)] <- 0
+
+```
+
+Control
+```{r}
+tran_dir <- "/Users/isabella/Library/CloudStorage/Box-Box/UMN/Postdoc/Control/nctpy/transitions_results_Cont"
+
+all_trans_con <- data.frame()
+for (t in dir(tran_dir)){
+  dat <- jsonlite::fromJSON(file.path(tran_dir, t))
+  dat <- cbind(data.frame(id = names(dat), 
+                          ses=sapply(strsplit(t, "_"), "[", 2), node = 1:100), data.frame(dat[[1]]))
+  all_trans_con <- rbind(all_trans_con, dat)
+  rm(dat)
+}
+
+all_trans_con <- merge(all_trans_con, labels, by = "node", all.x = TRUE)
+all_trans_con$id <- gsub("sub-", "", all_trans_con$id)
+all_trans_con$id <- as.integer(all_trans_con$id)
+all_trans_con$session <- as.numeric(stringr::str_extract_all(all_trans_con$ses , "\\d+"))
+all_trans_con <- merge(all_trans_con, demo, by = c("id", "session"), all.x = TRUE)
+all_trans_con$energy <- as.numeric(all_trans_con$energy)
+
+all_trans_con$age <- round(all_trans_con$Scan_Age, 0)
+
+all_trans_con <- all_trans_con %>%
+  arrange(id, session, node)
+all_trans_con$energy_log <- log1p(all_trans_con$energy)
+
+# nodel level age cors
+age_cor_by_net <- all_trans_con %>%
+  group_by(node) %>%
+  summarize(
+    age_cor = cor(Scan_Age, energy, use = "pairwise.complete.obs"),
+    n = sum(complete.cases(Scan_Age, energy)),
+    .groups = "drop"
+  )
+hist(age_cor_by_net$age_cor)
+km <- kmeans(age_cor_by_net$age_cor, centers = 2)
+age_cor_by_net <- data.frame(
+  value   = age_cor_by_net,
+  cluster = factor(km$cluster)
+)
+age_cor_by_net <- merge(age_cor_by_net, labels %>% select(value.node = node, network), all.x = TRUE)
+age_cor_by_net <- age_cor_by_net %>%
+  mutate(cont = ifelse(network == "Cont", 1, 0))
+ggplot(aes(x = value.node, y = value.age_cor, color = factor(cluster)), data = age_cor_by_net) +
+  geom_point(aes(shape = factor(cont))) +
+  geom_hline(yintercept = 0, color = "black") +
+  theme_minimal() +
+  xlab("Node") +
+  ylab("Age Correlation") +
+  labs(color = "Cluster") 
+
+
+ggplot(aes(x = network, y = energy_log), data = all_trans_con) +
+  geom_jitter(aes( color = network), alpha = 0.4) +
+     geom_violin() +
+    stat_summary(fun = median, geom = "crossbar", 
+               width = 0.5, color = "black", 
+               fatten = 2, size = 0.6) +
+  ylab("Energy (log)") +
+  theme_minimal() +
+  ggtitle("Total Energy Required to Activate Control State")
+ggsave(file.path(fig_dir, "con_energy_vio.jpeg"))
+
+
+all_trans_con <- all_trans_con %>%
+  group_by(id, session) %>%
+  summarize(total_energy = mean(total_energy))
+all_trans_con <- merge(all_trans_con, demo, by = c("id", "session"), all.x = TRUE)
+
+
+
+all_trans_con <- merge(all_trans_con, qc, by = c("id", "session"), all.x = TRUE)
+all_trans_con$q[is.na(all_trans_con$q)] <- 0
+
+
+```
+
+Gathering all transition energies 
+```{r}
+
+all_trans <- rbind(all_trans_dmn %>% mutate(network = "DMN"),
+                   all_trans_ment[, 1:8] %>% mutate(network = "Ment"),
+                   all_trans_con[, 1:8] %>% mutate(network = "Cont"),
+                   all_trans_dorsa[, 1:8] %>% mutate(network = "DorsAttn"),
+                   all_trans_lang[, 1:8] %>% mutate(network = "Lang"),
+                   all_trans_som %>% mutate(network = "Som"),
+                   all_trans_vis %>% mutate(network = "Vis"),
+                   all_trans_sal %>% mutate(network = "SalVentAttn"))
+
+hist(all_trans$total_energy)
+
+saveRDS(all_trans, file.path(home_dir, "all_trans.rds"))
+
+
+```
+# Sample
+```{r}
+length(unique(all_trans_ment$id))
+
+summary(all_trans_ment %>%
+  group_by(id) %>%
+  summarize(n = n()) %>% pull(n))
+
+summary(all_trans_ment$Scan_Age, na.rm = TRUE)
+
+
+
+temp <- all_trans_ment[!duplicated(all_trans_ment$id), ]
+
+sum(temp$sex == "Female", na.rm = TRUE)/nrow(temp)
+```
+
+
+# Comparing dev slopes
+```{r}
+
+t_dir <- "/Users/isabella/Library/CloudStorage/Box-Box/UMN/Postdoc/Control/tables/"
+
+library(ggplot2)
+
+# comparing within-person slopes
+library(dplyr)
+
+df_long <- all_trans %>%   # id, session, network, total_energy, Scan_Age
+  group_by(id) %>%
+  mutate(
+    Scan_Age_pm = mean(Scan_Age, na.rm = TRUE),
+    age_w = Scan_Age - Scan_Age_pm,      # within-person age change
+    age_b = Scan_Age_pm                  # between-person age (optional)
+  ) %>%
+  ungroup()
+library(lme4)
+
+# modeling all change in energy for all brain state transitions
+
+df_long$network <- relevel(factor(df_long$network), ref = "Ment")
+
+m1 <- lmer(total_energy ~  site_shell + Scan_Age + q
+           + network + Scan_Age*network
+  + (1 | id),
+  data = df_long
+)
+summary(m1)
+
+library(ggeffects)
+library(sjPlot)
+pred <- ggpredict(
+  m1,
+  terms = c("Scan_Age [all]", "network")
+)
+
+tab_model(m1, title = "Age-Related Change in Energy by Brain State", CSS = list(css.table = '+font-family: Arial;'),
+          file = file.path(t_dir, "age_model.html")) #file = d) 
+
+
+
+```
+
+Slope comparison
+```{r}
+
+library(emmeans)
+
+slopes <- emtrends(m1, ~ network, var = "Scan_Age") #age_w")
+slopes
+
+# which slopes differ from zero
+summary(slopes, infer = c(TRUE, TRUE), adjust = "BH")
+
+pairs(slopes)
+
+pairwise_slopes <- pairs(slopes, adjust = "BH")  # or "tukey", "bonferroni", etc.
+
+pairwise_table <- as.data.frame(pairwise_slopes)
+
+library(kableExtra)
+pairwise_table %>%
+  mutate(
+    estimate = round(estimate, 3),
+    SE = round(SE, 3),
+    # t = round(t.ratio, 2),
+    p = signif(p.value, 3)
+  ) %>%
+  select(contrast, estimate, SE, df, p)%>%
+  kbl(format = "html", caption = "Pairwise slope comparisons (BH-adjusted)") %>%
+  kable_styling(full_width = FALSE) %>%
+  save_kable(file.path(t_dir, "pairwise_slopes.html"))
+
+pairs_df <- as.data.frame(confint(pairs(slopes)))
+# pairs_df$contrast <- gsub("Cont", "FP", pairs_df$contrast)
+# pairs_df$contrast <- gsub("Som", "SOM", pairs_df$contrast)
+# pairs_df$contrast <- gsub("Vis", "VIS", pairs_df$contrast)
+# pairs_df$contrast <- gsub("SalVentAttn", "VAN", pairs_df$contrast)
+# pairs_df$contrast <- gsub("DorsAttn", "DAN", pairs_df$contrast)
+# pairs_df$contrast <- gsub("Ment", "Soc Cog", pairs_df$contrast)
+
+```
+
+Plot slope beta comparisons
+```{r}
+
+# plotting slope differences
+
+library(dplyr)
+library(tidyr)
+library(ggplot2)
+library(patchwork)
+
+pairs_df2 <- pairs_df %>%
+  tidyr::separate(contrast, into = c("net1", "net2"), sep = " - ") %>%
+  mutate(
+    contrast_label = paste(net1, "-", net2)
+  ) %>%
+  arrange(estimate) %>%   # 👈 key line (small → large)
+  mutate(
+    contrast_label = factor(contrast_label, levels = contrast_label)
+  )
+
+legend_df <- data.frame(
+  x = c(0.4, 0.6),
+  y = c(0.5, 0.5),
+  network = c("First", "Second")
+)
+
+legend_plotR <- ggplot() +
+  geom_point(aes(x = 0.4, y = 0.5), 
+             color = "black", size = 3, alpha = 0.3) +
+  geom_point(aes(x = 0.36, y = 0.5), 
+             color = "gray40", size = 3) +   # mimic left half
+  geom_point(aes(x = 0.44, y = 0.5), 
+             color = "gray70", size = 3) +   # mimic right half
+  annotate("text", x = 0.4, y = 0.2, label = "A - B", size = 3) +
+  xlim(0, 1) + ylim(0, 1) +
+  theme_void()
+
+legend_plotL <- ggplot() +
+  geom_point(aes(x = 0.4, y = 0.5), 
+             color = "black", size = 3, alpha = 0.3) +
+  geom_point(aes(x = 0.36, y = 0.5), 
+             color = "gray70", size = 3) +   # mimic left half
+  geom_point(aes(x = 0.44, y = 0.5), 
+             color = "gray40", size = 3) +   # mimic right half
+  annotate("text", x = 0.4, y = 0.2, label = "A - B", size = 3) +
+  xlim(0, 1) + ylim(0, 1) +
+  theme_void()
+
+
+```
+
+Pairwise slope comparisons 
+```{r}
+library(dplyr)
+library(tidyr)
+library(ggplot2)
+
+
+test <- cbind(data.frame(slopes) %>% select(c(net1 = network, Scan_Age.trend1= Scan_Age.trend)),
+              data.frame(slopes) %>% select(c(net2 = network, Scan_Age.trend2 = Scan_Age.trend)))
+
+
+pairs_df2 <- merge(pairs_df2, test %>% select(net1, Scan_Age.trend1), 
+                   by = c("net1"), all.x = TRUE)
+pairs_df2 <- merge(pairs_df2, test %>% select(net2, Scan_Age.trend2), 
+                   by = c("net2"), all.x = TRUE)
+
+pairs_df2 <- pairs_df2 %>% mutate(
+    includes_zero = asymp.LCL <= 0 & asymp.UCL >= 0,
+    sig = !includes_zero   # TRUE = CI does NOT include 0
+  ) %>%
+  mutate(
+    diff = Scan_Age.trend1 - Scan_Age.trend2
+  ) %>%
+  arrange(desc(abs(diff)), net2) %>%   # largest difference at top
+  mutate(
+    contrast_label = factor(contrast_label, levels = contrast_label)
+  )
+
+names(network_colors) <- c("Vis", "Som", "DorsAttn", "SalVentAttn", "Limb", "Cont", "DMN")
+names(other_colors) <- c( "Lang", "Soc Cog")
+
+pairs_df2<- pairs_df2 %>%
+  mutate(across(
+    where(is.character),
+    ~ ifelse(. == "Ment", "Soc Cog", .)
+  ))
+
+
+trade_slopes <- ggplot(pairs_df2, aes(y = contrast_label, alpha = as.factor(sig))) +
+  geom_segment(
+    aes(
+      x = Scan_Age.trend1,
+      xend = Scan_Age.trend2,
+      yend = contrast_label,
+      alpha = as.factor(sig)
+    ),
+    color = "black",
+    linewidth = 0.8
+  ) +
+  geom_point(
+    aes(x = Scan_Age.trend1, color = net1),
+    size = 2
+  ) +
+  geom_point(
+    aes(x = Scan_Age.trend2, color = net2),
+    size = 2
+  ) +
+  geom_vline(xintercept = 0, linetype = "dashed") +
+  scale_color_manual(values = c(network_colors, other_colors)) +
+  scale_alpha_manual(values = c("TRUE" = 1, "FALSE" = 0.25), guide = "none") +
+  labs(
+    # alpha = "Significant",
+    color = "Brain State",
+    x = "Slope Reflecting Energy Change with Age",
+    y = "Pairwise Comparison",
+  ) +
+  theme_minimal() +
+  theme(axis.title.x = element_text(size = 9),
+        axis.title.y = element_text(size = 9),
+        axis.text.x  = element_text(size = 8),
+        axis.text.y  = element_text(size = 6),
+        plot.title   = element_text(size = 10, hjust= 0.5)) +
+  ggtitle("Pairwise Comparisons of Age-Related Slopes in \n Brain State Energy Requirements")
+
+trade_slopes
+
+```
+
+
+Plot som/soccog tradeoff
+```{r}
+# get crossing age:ment/som
+pred_sub <- pred[pred$group %in% c("Ment", "Som"), ]
+coefs <- fixef(m1)
+cross_age <- -coefs["networkSom"] / coefs["Scan_Age:networkSom"]
+cross_age
+
+# get crossing age:ment/vis
+pred_sub <- pred[pred$group %in% c("Ment", "Vis"), ]
+coefs <- fixef(m1)
+cross_age <- -coefs["networkVis"] / coefs["Scan_Age:networkVis"]
+cross_age
+
+# differences in slopes 
+focus <- df_long %>%
+  filter(network %in% c("Som", "Ment")) %>%
+  filter(total_energy > 1900)
+focus <- merge(focus, vrrsb_avg, by = "id", all.x = TRUE)
+
+
+y_top <- max(pred_sub$conf.high, na.rm = TRUE)
+
+# trade_dev <- ggplot(focus, aes(Scan_Age, total_energy, group = network, color = factor(network))) +
+trade_dev <- ggplot(pred_sub, aes(x, predicted, group = group, color = factor(group))) +
+  geom_line(size = 1.2) +
+  geom_ribbon(aes(ymin = conf.low, ymax = conf.high, fill = group),
+              alpha = 0.2, color = NA) +
+  geom_point(size = 0.5, alpha = 0.5, aes(x = Scan_Age, y = total_energy, 
+                                          group = network, color = factor(network)), data = focus) +
+  geom_line(aes(x = Scan_Age, y = total_energy,color = factor(network), 
+                group = interaction(id, network)), alpha = 0.15, data = focus) +
+  geom_vline(xintercept = cross_age, linetype = "dashed") +
+  annotate("text",
+           x = cross_age - 5,   # shift left
+           y = Inf,
+           label = "Somatomotor state \n prioritized",
+           hjust = 1,
+           vjust = 1.5,
+               color = unname(network_colors["SOM"]),
+           size = 2) +
+  annotate("text",
+           x = cross_age + 5,   # shift right
+           y = Inf,
+           label = "Social cognition state \n prioritized",
+           color = unname(other_colors["Soc Cog"]),
+           hjust = 0,
+           vjust = 1.5,
+           size = 2) +
+  # geom_smooth(aes(group = network, color = network), method = "lm", se = TRUE) +
+  scale_color_manual(values = c(unname(other_colors["Soc Cog"]), unname(network_colors["SOM"]))) +
+  scale_fill_manual(values = c(unname(other_colors["Soc Cog"]), unname(network_colors["SOM"]))) +
+  theme_minimal() +
+    theme(
+        axis.title.x = element_text(size = 9),
+        axis.title.y = element_text(size = 9),
+        axis.text.x  = element_text(size = 8),
+        axis.text.y  = element_text(size = 8),
+        plot.title   = element_text(size = 10, hjust= 0.5),
+        legend.text  = element_text(size = 7),
+        legend.title = element_text(size = 8),
+        legend.position = "none") +
+  labs(x = "Scan Age (mo)", y = "Control Energy", color = "Brain State Transition") +
+  ggtitle("Switch in Social Cognition/Somatomotor \n Energy Tradeoff in Development ")
+ 
+trade_dev
+
+plot_df <- as.data.frame(slopes)
+
+# ggplot(plot_df,
+#        aes(age_w.trend, reorder(network, age_w.trend))) +
+#   geom_point(size = 3) +
+#   geom_errorbarh(
+#     aes(xmin = age_w.trend - SE, xmax = age_w.trend + SE),
+#     height = 0
+#   ) +
+#   geom_vline(xintercept = 0, linetype = "dashed") +
+#   labs(
+#     x = "Within-person age slope",
+#     y = "Network"
+#   ) +
+#   theme_minimal()
+# 
+
+
+```
+
+
+
+
+Atlas
+```{r}
+ggseg(.data = labels %>% select(-c(label)), atlas = schaefer7_100, 
+      mapping = aes(fill = network), 
+      position = c("stacked")) 
+
+```
+
+# Visualizing states
+
+## Social cog regions
+
+From Neurosynth mentalizing
+```{r}
+
+soc <- read.table("/Users/isabella/Library/CloudStorage/Box-Box/UMN/Postdoc/Control/nctpy/social cognition/schaefer_socialcog_overlap.txt",
+                  header = TRUE)
+
+# overlapping voxels
+ggplot(aes(x = as.numeric(voxel_count)), data = soc) +
+  geom_histogram() +
+  theme_minimal()
+
+# % parcel overlapping
+ggplot(aes(x = as.numeric(percent_overlap)), data = soc) +
+  geom_histogram() +
+  theme_minimal()
+
+# to match federenko language: 32; 19
+soc <- soc %>%
+  filter(percent_overlap > 3)
+
+ggplot(aes(x = as.numeric(voxel_count)), data = soc) +
+  geom_histogram() +
+  theme_minimal()
+
+labels$values <- NA
+labels$values <- ifelse(labels$region %in% soc$label, 1, 0)
+labels$hemi <- ifelse(grepl("LH", labels$label), "left", "right")
+
+ggseg(.data = labels %>% select(-c(label)), atlas = schaefer7_100, 
+      mapping = aes(fill = values, color = network), 
+      position = c("stacked")) + 
+  labs(fill="")
+
+# blank brain
+ggseg(atlas = schaefer7_100,
+      mapping = aes(),
+      position = "stacked",
+      fill = "black",
+      colour = "grey60",   # outline color
+      size = 0.25) +       # line thickness
+  theme_void()
+
+# custom system display
+labels_cont <- labels %>%
+  mutate(values = ifelse(network == "Cont", 1, NA))
+
+ggseg(.data = labels_cont %>% select(-c(label)),
+      atlas = schaefer7_100,
+      mapping = aes(fill = values, color = network),
+      position = "stacked") +
+  scale_fill_gradient(
+    low = "black",
+    high = "blue1",
+    na.value = "black"
+  ) +
+  scale_color_manual(
+    values = c("Cont" = "grey60"),
+    na.value = "grey60"
+  ) +
+  labs(fill = "") +
+  theme_void() +
+  guides(color = "none")
+
+write.table(
+  soc %>% select(parcel_id),
+  "/Users/isabella/Library/CloudStorage/Box-Box/UMN/Postdoc/Control/nctpy/social cognition/socialcog_regions.txt",
+  col.names = FALSE,
+  row.names = FALSE,
+  sep = ","
+)
+```
+
+
+
+## Federenko regions
+```{r}
+
+lang <- readLines("/Users/isabella/Library/CloudStorage/Box-Box/UMN/Postdoc/Control/nctpy/federenko/all_schaefer_overlaps_thr0.03.txt")
+
+nums <- sub(".*:", "", lang)
+values <- unlist(strsplit(nums, "\\s+"))
+values <- values[values != ""]
+values <- as.numeric(values)
+values <- values[values != 0]
+
+
+labels$values <- ifelse(labels$node %in% values, 1, 0)
+labels$hemi <- ifelse(grepl("LH", labels$label), "left", "right")
+
+
+data("schaefer7_100")  #
+data("schaefer7_100_3d")  #
+
+head(schaefer7_100)
+
+
+sum(df_merged$values, na.rm = TRUE)
+
+# from val
+library(ggseg)
+library(ggsegSchaefer)
+library(ggsegSchaefer)
+ as_tibble(schaefer17_100)
+ 
+ ggseg( atlas = schaefer7_100, 
+      position = c("stacked"),
+       mapping = aes(fill = region)) 
+
+# schaefer 7
+ggseg(.data = labels %>% select(-c(label)), atlas = schaefer7_100, 
+      mapping=aes(fill=values), position = c("stacked")) + 
+  # theme_void() + 
+  labs(fill="") 
+
+ggseg(combine,
+           atlas = schaefer17_100,
+           mapping = aes(fill = X0),
+           position = "stacked") 
+
+
+labels_bin <- tibble::tibble(
+  region  = labels$region,  # example names
+  overlap = labels$values                              # 1 = overlap, 0 = no overlap
+)
+
+brain_df <- schaefer7_100$data %>%
+  left_join(labels_bin, by = "region")
+
+ggseg(
+  atlas   = schaefer7_100,       # NOTE: object, not "schaefer7_100" string
+  data    = labels_bin,          # in older versions this arg is `.data`
+  mapping = aes(fill = factor(overlap))
+) +
+  scale_fill_manual(
+    values = c("0" = "grey90", "1" = "darkred"),
+    drop   = FALSE,
+    name   = "Overlap"
+  ) +
+  theme_void() +
+  ggtitle("Binary overlap on Schaefer 7/100")
+
+
+
+
+load(file="/Users/isabella/Library/CloudStorage/Box-Box/UMN/Postdoc/Control/nctpy/federenko/schaefer17_100_3d.RData")
+lh_label <- schaefer17_100_3d$ggseg_3d[[1]]['region'][2:51,1:1]
+rh_label <- schaefer17_100_3d$ggseg_3d[[2]]['region'][2:51,1:1]
+label <- rbind(lh_label, rh_label)
+hemi <- c(rep('left', 50), rep('right', 50))
+label <- cbind(label, hemi)
+language <- read.csv('/Users/isabella/Library/CloudStorage/Box-Box/UMN/Postdoc/Control/nctpy/federenko/languageroi.csv')
+combine <- cbind(language, label)
+ggseg(combine,
+           atlas = schaefer17_100,
+           mapping = aes(fill = X0),
+           position = "stacked") 
+
+
+load(file="/Users/isabella/Library/CloudStorage/Box-Box/UMN/Postdoc/Control/nctpy/federenko/schaefer7_100_3d.RData")
+lh_label <- schaefer7_100_3d$ggseg_3d[[1]]['region'][2:51,1:1]
+rh_label <- schaefer7_100_3d$ggseg_3d[[2]]['region'][2:51,1:1]
+label <- rbind(lh_label, rh_label)
+hemi <- c(rep('left', 50), rep('right', 50))
+label <- cbind(label, hemi)
+#language <- read.csv('/Users/isabella/Library/CloudStorage/Box-Box/UMN/Postdoc/Control/nctpy/federenko/languageroi.csv')
+language <- labels$values
+combine <- cbind(language, label)
+ggseg(combine,
+           atlas = schaefer7_100,
+           mapping = aes(fill = language),
+           position = "stacked") 
+```
+
+
+# Plotting developmental trajectories of transition energies by brain state
+
+Setting axes labels for all plots
+```{r}
+ylims <- range(rbind(all_trans_con$total_energy, all_trans_dmn$total_energy, all_trans_dorsa$total_energy,
+                     all_trans_lang$total_energy, all_trans_ment$total_energy, all_trans_sal$total_energy, 
+                     all_trans_vis$total_energy, all_trans_som$total_energy), na.rm = TRUE)
+
+```
+
+
+## Transitioning to vis
+```{r}
+
+# all transitions completed 
+any(grepl("False", all_trans_vis$inversion_error))
+any(grepl("False", all_trans_vis$revisstruction_error))
+
+hist(all_trans_vis$total_energy)
+
+
+ggplot(aes(x = Scan_Age, y = total_energy), data = all_trans_vis) +
+  geom_point() +
+  geom_smooth(method = "lm", se = FALSE) +
+  theme_minimal() +
+  ylab("Total Energy") +
+  xlab("Age (months)") +
+  ggtitle("Total Energy Required to Activate vis Over Development")
+ggsave(file.path(fig_dir, "vis_energy_dev.jpeg"))
+
+
+
+hist(all_trans_vis_split %>% filter(network == "visttn") %>% pull(total_energy))
+
+all_trans_vis2 <- all_trans_vis |> 
+  dplyr::filter(
+    !is.na(total_energy),
+    !is.na(Scan_Age),
+    !is.na(site_shell),
+    !is.na(id)
+  )
+
+
+# plot
+library(ggeffects)
+library(patchwork)
+
+
+VIS <- plot_dev_energy(og_df = all_trans_vis2, 
+                       pred_df = pred[pred$group %in% "Vis", ], ##pred_df_vis, 
+                net = "Vis", net_lab = "Visual", sig_label = "*") + coord_cartesian(ylim = ylims)
+library(stringr)
+VIS2 <- brain_net("Vis")
+
+VIS3 <- VIS +
+  inset_element(
+    VIS2,
+    left = 0.78,
+    bottom = 0.78,
+    right = 0.99,
+    top = 0.99,   
+    ignore_tag = TRUE
+  ) 
+VIS3
+```
+
+## Transitioning to sal
+```{r}
+
+# all transitions completed 
+any(grepl("False", all_trans_sal$inversion_error))
+any(grepl("False", all_trans_sal$resalstruction_error))
+
+hist(all_trans_sal$total_energy)
+
+ggplot(aes(x = Scan_Age, y = total_energy), data = all_trans_sal) +
+  geom_point() +
+  geom_smooth(method = "lm", se = FALSE) +
+  theme_minimal() +
+  ylab("Total Energy") +
+  xlab("Age (months)") +
+  ggtitle("Total Energy Required to Activate sal Over Development")
+ggsave(file.path(fig_dir, "sal_energy_dev.jpeg"))
+
+all_trans_sal_split$sall <- ifelse(all_trans_sal_split$network == "SalVentAttn", 1, 0)
+ggplot(aes(x = Scan_Age, y = total_energy), data = all_trans_sal_split %>% filter(network == "salttn")) +
+  geom_point() +
+  facet_wrap(~ sall) +
+  geom_smooth(method = "lm", se = FALSE) +
+  theme_minimal() +
+  ylab("Total Energy") +
+  xlab("Age (months)") +
+  ggtitle("Total Energy Required to Activate sal Over Development")
+ggsave(file.path(fig_dir, "sal_energy_dev.jpeg"))
+
+
+hist(all_trans_sal_split %>% filter(network == "salttn") %>% pull(total_energy))
+
+
+
+SAL <- plot_dev_energy(og_df = all_trans_sal, 
+                       pred_df = pred[pred$group %in% "SalVentAttn", ], #pred_df_sal, 
+                net = "SalVentAttn", net_lab = "Salience/Ventral Attention")  + coord_cartesian(ylim = ylims)
+
+SAL2 <- brain_net("SalVentAttn")
+
+SAL3 <- SAL +
+  inset_element(
+    SAL2,
+    left = 0.78,
+    bottom = 0.78,
+    right = 0.99,
+    top = 0.99,   
+    ignore_tag = TRUE
+  )
+```
+
+See run_control_trans.py for nctpy calculations of transition energies. 
+
+## Transitioning to dorsal attention
+
+```{r}
+
+# all transitions completed 
+any(grepl("False", all_trans_dorsa$inversion_error))
+any(grepl("False", all_trans_dorsa$redorsastruction_error))
+
+hist(all_trans_dorsa$total_energy)
+
+
+ggplot(aes(x = Scan_Age, y = total_energy), data = all_trans_dorsa) +
+  geom_point() +
+  geom_smooth(method = "lm", se = FALSE) +
+  theme_minimal() +
+  ylab("Total Energy") +
+  xlab("Age (months)") +
+  ggtitle("Total Energy Required to Activate dorsa Over Development")
+ggsave(file.path(fig_dir, "dorsa_energy_dev.jpeg"))
+
+all_trans_dorsa_split$dorsal <- ifelse(all_trans_dorsa_split$network == "DorsAttn", 1, 0)
+ggplot(aes(x = Scan_Age, y = total_energy), data = all_trans_dorsa_split %>% filter(network == "DorsAttn")) +
+  geom_point() +
+  facet_wrap(~ dorsal) +
+  geom_smooth(method = "lm", se = FALSE) +
+  theme_minimal() +
+  ylab("Total Energy") +
+  xlab("Age (months)") +
+  ggtitle("Total Energy Required to Activate dorsa Over Development")
+ggsave(file.path(fig_dir, "dorsa_energy_dev.jpeg"))
+
+
+hist(all_trans_dorsa_split %>% filter(network == "DorsAttn") %>% pull(total_energy))
+
+dorsa <- plot_dev_energy(og_df = all_trans_dorsa, pred_df = pred[pred$group %in% "DorsAttn", ], #pred_df_dorsa, 
+                net = "DorsAttn", net_lab = "Doral Attention", sig_label = "*") + coord_cartesian(ylim = ylims)
+
+dorsa2 <- brain_net("DorsAttn")
+
+dorsa3 <- dorsa +
+  inset_element(
+    dorsa2,
+    left = 0.78,
+    bottom = 0.78,
+    right = 0.99,
+    top = 0.99,   
+    ignore_tag = TRUE
+  )
+```
+
+
+
+
+
+## Transitioning to somatomotor state
+
+```{r}
+# all transitions completed 
+any(grepl("False", all_trans_som$inversion_error))
+any(grepl("False", all_trans_som$resomstruction_error))
+
+hist(all_trans_som$total_energy)
+# all_trans_som <- all_trans_som[all_trans_som$total_energy > 1900, ]
+
+all_trans_som <- all_trans_som %>% filter(total_energy > 1900)
+
+ggplot(aes(x = Scan_Age, y = total_energy), data = all_trans_som %>% filter(total_energy > 1900)) +
+  geom_point() +
+  geom_smooth(method = "loess", se = FALSE) +
+  theme_minimal() +
+  ylab("Total Energy") +
+  xlab("Age (months)") +
+  ggtitle("Total Energy Required to Activate som Over Development")
+ggsave(file.path(fig_dir, "som_energy_dev.jpeg"))
+
+
+som <- plot_dev_energy(og_df = all_trans_som, pred_df = pred[pred$group %in% "Som", ], #pred_df_som, 
+                net = "Som", net_lab = "Somatomotor", sig_label = "*") + coord_cartesian(ylim = ylims)
+
+som2 <- brain_net("Som")
+
+som3 <- som +
+  inset_element(
+    som2,
+    left = 0.78,
+    bottom = 0.78,
+    right = 0.99,
+    top = 0.99,   
+    ignore_tag = TRUE
+  )
+```
+
+### Associations with motor skills
+```{r}
+mullen <- mullen %>% mutate(session = age)
+
+all_trans_som <- merge(all_trans_som, mullen, by = c("id", "session"), all.x = TRUE)
+all_trans_som <- merge(all_trans_som, vrrsb_avg, by = c("id"), all.x = TRUE)
+
+
+hist(all_trans_som$total_energy)
+lmer.el <- lmer(gm_ae ~ 1 + Scan_Age + site_shell + (1 |id), data = all_trans_som) 
+summary(lmer.el)
+
+ggplot(aes(x = Scan_Age, y = gm_ae), data = all_trans_som %>% filter(total_energy > 2000)) +
+  geom_point() +
+  geom_smooth(method = 'lm', se = FALSE) +
+  theme_minimal() +
+  xlab("Total Energy") +
+  ylab("FM") +
+  ggtitle("Total Energy Required to Activate Lang and FM")
+
+# el
+ggplot(aes(x = total_energy, y = fm_ae), data = all_trans_som %>% filter(total_energy > 2000)) +
+  geom_point() +
+  geom_smooth(method = 'lm', se = FALSE) +
+  theme_minimal() +
+  xlab("Total Energy") +
+  ylab("FM") +
+  ggtitle("Total Energy Required to Activate Lang and FM")
+ggsave(file.path(fig_dir, "lang_energy_el.jpeg"))
+
+cor.test(all_trans_som$total_energy, all_trans_som$rsbtotal_mean) # -0.31
+lmer.el <- lmer(total_energy ~ 1 + fm_ae + site_shell + q + (1 |id), data = all_trans_som) 
+summary(lmer.el)
+
+
+ggplot(aes(x = total_energy, y = gm_ae), data = all_trans_som) +
+  geom_point() +
+  geom_smooth(method = 'lm', se = FALSE) +
+  theme_minimal() +
+  xlab("Total Energy") +
+  ylab("GM") +
+  ggtitle("Total Energy Required to Activate Lang and GM")
+ggsave(file.path(fig_dir, "lang_energy_el.jpeg"))
+
+cor.test(all_trans_som$total_energy, all_trans_som$rsbtotal_mean) # -0.31
+lmer.el <- lmer(total_energy ~ 1 + gm_ae + site_shell + q +(1 |id), data = all_trans_som) 
+summary(lmer.el)
+
+
+
+ggplot(aes(x = total_energy, y = rsbtotal_mean), data = all_trans_som) +
+  geom_point() +
+  geom_smooth(method = 'lm', se = FALSE) +
+  theme_minimal() +
+  xlab("Total Energy") +
+  ylab("RSB") +
+  ggtitle("Total Energy Required to Activate Som and RSB")
+ggsave(file.path(fig_dir, "lang_energy_el.jpeg"))
+
+lmer.el <- lmer(total_energy ~ 1 + rsbtotal_mean + site_shell + q + (1 |id), data = all_trans_som) 
+summary(lmer.el)
+
+
+ggplot(aes(x = total_energy, y = el_ae), data = all_trans_som %>% filter(total_energy > 1900)) +
+  geom_point() +
+  geom_smooth(method = 'lm', se = FALSE) +
+  theme_minimal() +
+  xlab("Total Energy") +
+  ylab("EL") +
+  ggtitle("Total Energy Required to Activate Som and EL")
+ggsave(file.path(fig_dir, "lang_energy_el.jpeg"))
+
+cor.test(all_trans_som$el_ae, all_trans_som$fm_ae)
+
+lmer.el <- lmer(total_energy ~ 1 + el_ae + site_shell + (1 |id), data = all_trans_som%>% filter(total_energy > 1900)) 
+summary(lmer.el)
+
+```
+
+
+
+## Transitioning to control state
+
+```{r}
+# all transitions completed 
+any(grepl("False", all_trans_con$inversion_error))
+any(grepl("False", all_trans_con$reconstruction_error))
+
+hist(all_trans_con$total_energy)
+
+hist(all_trans_con$energy)
+hist(log(all_trans_con$energy))
+
+summary(all_trans_con$energy)
+
+all_trans_con$energy_log <- log1p(all_trans_con$energy)
+
+
+# plots
+con <- plot_dev_energy(og_df = all_trans_con, pred_df = pred[pred$group %in% "Cont", ], #pred_df_con, 
+                net = "Cont", net_lab = "Executive Control") + coord_cartesian(ylim = ylims)
+
+con2 <- brain_net("Cont")
+ggsave(file.path(fig_dir,"Figx_cont.jpeg"))
+
+con3 <- con +
+  inset_element(
+    con2,
+    left = 0.78,
+    bottom = 0.78,
+    right = 0.99,
+    top = 0.99,   
+    ignore_tag = TRUE
+  )
+```
+
+### Associations with mefs
+```{r}
+
+# all_trans_con <- merge(all_trans_con, mefes_avg, by = c("id"), all.x = TRUE)
+all_trans_con <- merge(all_trans_con, mefes_avg %>% select(id, standard_score_mean2), by = c("id"), all.x = TRUE)
+
+
+lmer.ef <- lmer(standard_score_mean2 ~ 1 + Scan_Age + site_shell + (1 |id), data = all_trans_con) 
+summary(lmer.ef)
+
+# el
+ggplot(aes(x = Scan_Age, y = standard_score_mean2), data = all_trans_con) +
+  geom_point() +
+  geom_smooth(method = 'lm', se = FALSE) +
+  theme_minimal() +
+  xlab("Total Energy") +
+  ylab("Mean Standard Score") +
+  ggtitle("Total Energy Required to Activate Control and MEFS standard score")
+ggsave(file.path(fig_dir, "lang_energy_el.jpeg"))
+
+cor.test(all_trans_con$total_energy, all_trans_con$standard_score_mean) # -0.31
+lmer.ef <- lmer(total_energy ~ 1 + standard_score_mean2 + site_shell + q + (1 |id), data = all_trans_con) 
+summary(lmer.ef)
+
+pred_df_con_ef <- ggpredict(lmer.ef, terms = c("standard_score_mean2"))
+con_ef <- plot_en_beh(og_df = all_trans_con, pred_df = pred_df_con_ef, 
+                        beh = "standard_score_mean2", color = network_colors["FP"], 
+                        xlab = "MEFS Standard Score", 
+                        title = "Executive Functioning & \n Executive Control State Energy")
+
+
+
+mullen$session <- mullen$age
+
+all_trans_con <- merge(all_trans_con, mullen, by = c("id", "session"), all.x = TRUE)
+
+lmer.el <- lmer(total_energy ~ 1 + el_ae + site_shell + q +(1 |id), data = all_trans_con) 
+summary(lmer.el)
+pred_df_con_el <- ggpredict(lmer.el, terms = c("el_ae"))
+con_el <- plot_en_beh(og_df = all_trans_con, pred_df = pred_df_con_el, 
+                        beh = "el_ae", color = network_colors["FP"], 
+                        xlab = "Expressive Language T-Score", 
+                        title = "Expressive Language & \n Executive Control State Energy")
+
+lmer.rl <- lmer(total_energy ~ 1 + rl_ae + site_shell + (1 |id), data = all_trans_con) 
+summary(lmer.rl)
+pred_df_con_rl <- ggpredict(lmer.rl, terms = c("rl_ae"))
+con_rl <- plot_en_beh(og_df = all_trans_con, pred_df = pred_df_con_rl, 
+                        beh = "rl_ae", color = network_colors["FP"], 
+                        xlab = "Receptive Language T-Score", 
+                        title = "Receptive Language & \n Executive Control State Energy")
+
+
+
+```
+
+
+all con plot
+```{r}
+
+all_con <- (con_ef)/
+  (con_el)/
+  (con_rl)/
+  plot_annotation(title = "Behavioral Associations with Executive Control State Energy",
+                  theme = theme(
+                    plot.title = element_text(
+                      hjust = 0.5,     # center
+                      size = 14,
+                      face = "bold"
+                    )
+                  ))
+
+ggsave(file.path(fig_dir, "Fig4_con_beh.jpeg"), width = 6, height =10, dpi = 300)
+
+
+```
+
+
+
+## Transitioning to language state
+from Federenko regions
+
+```{r}
+# all transitions completed 
+any(grepl("False", all_trans_lang$inversion_error))
+any(grepl("False", all_trans_lang$reconstruction_error))
+
+hist(all_trans_lang$total_energy)
+
+hist(all_trans_lang$energy)
+hist(log(all_trans_lang$energy))
+
+summary(all_trans_lang$energy)
+
+all_trans_lang$energy_log <- log1p(all_trans_lang$energy)
+
+ggplot(aes(x = energy, color = network, fill = network),
+       data = all_trans_lang %>% filter(id %in% sample(unique(all_trans_lang$id), 20))) +
+  geom_histogram() +
+  facet_wrap(~ factor(id)) +
+  theme_minimal() 
+
+
+ggplot(aes(x = network, y = energy_log), data = all_trans_lang) +
+  geom_jitter(aes( color = network), alpha = 0.4) +
+     geom_violin() +
+    stat_summary(fun = median, geom = "crossbar", 
+               width = 0.5, color = "black", 
+               fatten = 2, size = 0.6) +
+  ylab("Energy (log)") +
+  theme_minimal() +
+  ggtitle("Total Energy Required to Activate Language State")
+ggsave(file.path(fig_dir, "lang_energy_vio.jpeg"))
+
+
+ggplot(aes(x = Scan_Age, y = total_energy), data = all_trans_lang) +
+  geom_point() +
+  geom_smooth(method = "lm", se = FALSE) +
+  theme_minimal() +
+  ylab("Total Energy") +
+  xlab("Age (months)") +
+  ggtitle("Total Energy Required to Activate lang Over Development")
+ggsave(file.path(fig_dir, "lang_energy_dev.jpeg"))
+
+
+lang1 <- plot_dev_energy(og_df = all_trans_lang, pred_df = pred[pred$group %in% "Lang", ], #pred_df_lang, 
+                net = "Lang", net_lab = "Language", sig_label = "*") + coord_cartesian(ylim = ylims)
+
+lang <- readLines("/Users/isabella/Library/CloudStorage/Box-Box/UMN/Postdoc/Control/nctpy/federenko/all_schaefer_overlaps_thr0.03.txt")
+nums <- sub(".*:", "", lang)
+values <- unlist(strsplit(nums, "\\s+"))
+values <- values[values != ""]
+values <- as.numeric(values)
+values <- values[values != 0]
+labels$values <- ifelse(labels$node %in% values, 1, 0)
+
+lang2 <- brain_vec(region_vec = labels, fill_col = unname(other_colors["Lang"]))
+ggsave(file.path(fig_dir,"Figx_lang.jpeg"))
+
+
+lang3 <- lang1 +
+  inset_element(
+    lang2,
+    left = 0.78,
+    bottom = 0.78,
+    right = 0.99,
+    top = 0.99,   
+    ignore_tag = TRUE
+  )
+
+
+all_trans_lang_net <- all_trans_lang %>%
+  group_by(id, Scan_Age, network) %>%
+  summarize(energy_sum = sum(energy)) %>%
+  mutate(energy_sum_log = log1p(energy_sum))
+hist(all_trans_lang_net$energy_sum_log)
+
+ggplot(aes(x = Scan_Age, y = energy_sum,
+           color = as.factor(network),
+           group = as.factor(network)),
+       data = all_trans_lang_net) +
+  # geom_point() +
+  geom_smooth(method = "lm", se = FALSE) +
+  # facet_wrap(~network, ncol = 2) +
+  theme_minimal() +
+  ylab("Total Energy") +
+  xlab("Age (months)") +
+  ggtitle("Total Energy Required to Activate lang Over Development")
+ggsave(file.path(fig_dir, "lang_energy_dev.jpeg"))
+
+```
+
+
+### Associations with mullen
+
+```{r}
+
+mullen <- mullen %>% mutate(session = age)
+
+all_trans_lang <- merge(all_trans_lang, mullen, by = c("id", "session"), all.x = TRUE)
+all_trans_lang <- merge(all_trans_lang, vrrsb_avg, by = c("id"), all.x = TRUE)
+
+
+# el
+ggplot(aes(x = total_energy, y = el_ae), data = all_trans_lang) +
+  geom_point() +
+  geom_smooth(method = 'lm', se = FALSE) +
+  theme_minimal() +
+  xlab("Total Energy") +
+  ylab("Mean Video Reference Score") +
+  ggtitle("Total Energy Required to Activate Language and EL")
+ggsave(file.path(fig_dir, "lang_energy_el.jpeg"))
+
+cor.test(all_trans_lang$total_energy, all_trans_lang$el_ae) # -0.31
+
+lmer.el <- lmer(total_energy ~ 1 + el_ae + site_shell + q #+ Scan_Age
+                + (1 |id), data = all_trans_lang) 
+summary(lmer.el)
+pred_df_lang_el <- ggpredict(lmer.el, terms = c("el_ae"))
+
+lang_el <- plot_en_beh(og_df = all_trans_lang, pred_df = pred_df_lang_el, 
+            beh = "el_ae", color = other_colors["Lang"], 
+            xlab = "Expressive Language T-Score", 
+            title = "Expressive Language & \n Language State Energy", sig_label = "*")
+
+
+# rl
+ggplot(aes(x = total_energy, y = rl_ae), data = all_trans_lang ) +
+  geom_point() +
+  geom_smooth(method = 'lm', se = FALSE) +
+  theme_minimal() +
+  xlab("Total Energy") +
+  ylab("Mean Video Reference Score") +
+  ggtitle("Total Energy Required to Activate lang and RL")
+ggsave(file.path(fig_dir, "lang_energy_rl.jpeg"))
+
+cor.test(all_trans_lang$total_energy, all_trans_lang$rl_ae) # -0.22
+
+lmer.rl <- lmer(total_energy ~ 1 + rl_ae + site_shell +q #+ Scan_Age 
+                + (1 |id), data = all_trans_lang) 
+summary(lmer.rl)
+
+
+pred_df_lang_rl <- ggpredict(lmer.rl, terms = c("rl_ae"))
+
+lang_rl <- plot_en_beh(og_df = all_trans_lang, pred_df = pred_df_lang_rl, 
+            beh = "rl_ae", color = other_colors["Lang"], 
+            xlab = "Receptive Language T-Score", 
+            title = "Recepive Language & \n Language State Energy", sig_label = "*")
+
+
+
+lmer.rsb <- lmer(total_energy ~ 1 + rsbtotal_mean + site_shell + q #+ Scan_Age 
+                + (1 |id), data = all_trans_lang) 
+summary(lmer.rsb)
+pred_df_lang_rsb <- ggpredict(lmer.rsb, terms = c("rsbtotal_mean"))
+lang_rsb <- plot_en_beh(og_df = all_trans_lang, pred_df = pred_df_lang_rsb, 
+            beh = "rsbtotal_mean", color = other_colors["Lang"], 
+            xlab = "Reciprocal Social Behavior Total Score", 
+            title = "Reciprocal Social Behavior & \n Language State Energy")
+
+
+
+ggplot(aes(x = total_energy, y = videorefscore_mean), data = all_trans_lang ) +
+    # facet_wrap(~network, ncol = 3) +
+  geom_point() +
+  geom_smooth(method = 'lm', se = FALSE) +
+  theme_minimal() +
+  xlab("Total Energy") +
+  ylab("Video Referenced RSB Score") +
+  ggtitle("Total Energy Required to Activate Language State and vr Scores")
+ggsave(file.path(fig_dir, "lang_energy_network_vref.jpeg"))
+
+
+ggplot(aes(x = total_energy, y = fm_ae), data = all_trans_lang ) +
+    # facet_wrap(~network, ncol = 3) +
+  geom_point() +
+  geom_smooth(method = 'lm', se = FALSE) +
+  theme_minimal() +
+  xlab("Total Energy") +
+  ylab("VFine Mo") +
+  ggtitle("Total Energy Required to Activate Language State and vr Scores")
+ggsave(file.path(fig_dir, "lang_energy_network_vref.jpeg"))
+lmer.rl <- lmer(total_energy ~ 1 + fm_ae + site_shell + (1 |id), data = all_trans_lang) 
+summary(lmer.rl)
+
+
+
+ggplot(aes(x = total_energy, y = rsbtotal_mean), data = all_trans_lang ) +
+  geom_point() +
+  geom_smooth(method = 'lm', se = FALSE) +
+  theme_minimal() +
+  xlab("Total Energy") +
+  ylab("Mean RSB total") +
+  ggtitle("Total Energy Required to Activate lang and RSB total")
+ggsave(file.path(fig_dir, "lang_energy_el.jpeg"))
+
+cor.test(all_trans_lang$total_energy, all_trans_lang$rsbtotal_mean) # -0.10
+
+```
+
+all lang plot
+```{r}
+
+all_lang <- (lang_el)/
+  (lang_rl)/
+  (lang_rsb) +
+  plot_annotation(title = "Behavioral Associations with Language State Energy",
+                  theme = theme(
+                    plot.title = element_text(
+                      hjust = 0.5,     # center
+                      size = 14,
+                      face = "bold"
+                    )
+                  ))
+all_lang
+
+
+ggsave(file.path(fig_dir, "Fig4_lang_beh.jpeg"), width = 6, height =10, dpi = 300)
+
+
+```
+
+
+## energy tradeoffs
+```{r}
+all_trans_lang2 <- rbind(all_trans_lang[, 1:7] %>% mutate(network = "Lang"),
+                         all_trans_som[, 1:7] %>% mutate(network = "Som"),
+                         all_trans_con[, 1:7] %>% mutate(network = "Cont"))
+
+
+all_trans_lang2 <- all_trans_lang2 %>%
+  pivot_wider(names_from = network, 
+              values_from = total_energy) %>%
+  mutate(lang_minus_som = Lang - Som,
+         lang_minus_con = Lang - Cont)
+ all_trans_lang2$lang_above_som <- ifelse(all_trans_lang2$lang_minus_som > 0, 1, 0)
+ 
+ all_trans_lang2 <- merge(all_trans_lang2, mullen, by = c("id", "session"), all.x = TRUE)
+
+
+# the greater lang is relative to som, the higher rbs --the greater som is relative ot lang, better reciprocal social behav
+lmer.rsb <- lmer(lang_minus_som  ~ el_ae + site_shell #~ lang_minus_som 
+                 + (1 | id), REML= FALSE, data = all_trans_lang2)
+summary(lmer.rsb)
+
+lmer.rsb <- lmer(Lang ~ el_ae + lang_minus_som #lang_above_som:rsbtotal_mean 
+                 + site_shell #~ lang_minus_som 
+                 + (1 | id), REML= FALSE, data = all_trans_lang2) #lmerControl(autoscale = TRUE))
+summary(lmer.rsb)
+
+lmer.rsb <- lmer(lang_minus_con ~ el_ae + site_shell #~ lang_minus_som 
+                 + (1 | id), REML= FALSE, data = all_trans_lang2)
+summary(lmer.rsb)
+
+```
+
+
+## Transitioning to mentalizing state
+
+Distributions
+```{r}
+
+# all transitions completed 
+any(grepl("False", all_trans_ment$inversion_error))
+any(grepl("False", all_trans_ment$reconstruction_error))
+
+hist(all_trans_ment$total_energy)
+
+hist(all_trans_ment$energy)
+hist(log(all_trans_ment$energy))
+
+summary(all_trans_ment$energy)
+
+all_trans_ment$energy_log <- log1p(all_trans_ment$energy)
+
+
+ggplot(aes(x = Scan_Age, y = total_energy), data = all_trans_ment) +
+  geom_point() +
+  geom_smooth(method = "lm", se = FALSE) +
+  theme_minimal() +
+  ylab("Total Energy") +
+  xlab("Age (months)") +
+  ggtitle("Total Energy Required to Activate ment Over Development")
+ggsave(file.path(fig_dir, "ment_energy_dev.jpeg"))
+
+hist(all_trans_ment$total_energy)
+
+cor(all_trans_ment$total_energy, all_trans_ment$Scan_Age, use = "pairwise.complete.obs")
+
+
+# pred_df_ment <- ggpredict(lmer.ment, terms = "Scan_Age [all]")
+
+ment1 <- plot_dev_energy(og_df = all_trans_ment, pred_df = pred[pred$group %in% "Ment", ],#pred_df_ment, 
+                net = "Soc Cog", net_lab = "Social Cognition", sig_label = "*") + coord_cartesian(ylim = ylims)
+
+
+soc <- read.table("/Users/isabella/Library/CloudStorage/Box-Box/UMN/Postdoc/Control/nctpy/social cognition/schaefer_socialcog_overlap.txt",
+                  header = TRUE)
+# to match federenko language: 32; 19
+soc <- soc %>%
+  filter(percent_overlap > 3)
+
+soc <- soc %>%
+  select(region = label) %>%
+  mutate(values = 1)
+
+ment2 <- brain_vec(region_vec = soc, fill_col = unname(other_colors["Soc Cog"]))
+ggsave(file.path(fig_dir,"Figx_ment.jpeg"))
+
+
+ment3 <- ment1 +
+  inset_element(
+    ment2,
+    left = 0.78,
+    bottom = 0.78,
+    right = 0.99,
+    top = 0.99,   
+    ignore_tag = TRUE
+  )
+
+```
+
+### Associations with vrrsb
+
+```{r}
+
+all_trans_ment <- merge(all_trans_ment, vrrsb_avg, by = c("id"), all.x = TRUE)
+
+all_trans_ment <- all_trans_ment %>%
+  group_by(id) %>%
+  mutate(
+    Scan_age_pm   = mean(Scan_Age, na.rm = TRUE),   # person mean age
+    Scan_age_wpm  = Scan_Age - Scan_age_pm                # within-person centered age
+  ) %>%
+  ungroup() %>%
+  mutate(
+    Scan_age_gmc = Scan_Age - mean(Scan_Age, na.rm = TRUE)  # grand-mean centered age
+  )
+
+ggplot(aes(x = total_energy),  data = all_trans_ment) +
+  geom_histogram() +
+  theme_minimal() +
+  xlab("Total Energy") +
+  ggtitle("Total Energy Required to Activate ment")
+
+
+hist(all_trans_ment$social_comm_mean)
+
+hist(vrrsb$videorefscore)
+
+# video-referenced score
+ggplot(aes(x = total_energy, y = videorefscore_mean), 
+       data = all_trans_ment ) +
+  geom_point() +
+  geom_smooth(method = 'lm', se = FALSE) +
+  theme_minimal() +
+  xlab("Total Energy") +
+  ylab("Mean Video Reference Score") +
+  ggtitle("Total Energy Required to Activate ment and vrScore")
+ggsave(file.path(fig_dir, "ment_energy_vref.jpeg"))
+
+cor.test(all_trans_ment$total_energy, all_trans_ment$videorefscore_mean) # 0.15
+         #all_trans_ment$videorefscore_mean) # 0.13
+
+lmer.vr <- lmer(total_energy ~ rsbtotal_mean + site_shell +q  #+ Scan_age_wpm + Scan_age_gmc#+ vr_age
+               + (1 | id), REML = FALSE, data = all_trans_ment)
+summary(lmer.vr)
+
+pred_df_ment_tot <- ggpredict(lmer.vr, terms = c("rsbtotal_mean"))
+ment_rsb <- plot_en_beh(og_df = all_trans_ment, pred_df = pred_df_ment_tot, 
+                        beh = "rsbtotal_mean", color = other_colors["Soc Cog"], 
+                        xlab = "Reciprocal Social Behavior Total Score", 
+                        title = "Reciprocal Social Behavior & \n Social Cognition State Energy", sig_label = "*")
+
+
+# rsb total
+ggplot(aes(x = total_energy, y = rsbtotal_mean), data = all_trans_ment) +#%>% filter(total_energy > 2000)) +
+  geom_point() +
+  geom_smooth(method = 'lm', se = FALSE) +
+  theme_minimal() +
+  xlab("Total Energy") +
+  ylab("RSB Total Score") +
+  ggtitle("Energy Required to Activate ment and RSB Total Score")
+ggsave(file.path(fig_dir, "ment_energy_rsbtot.jpeg"))
+cor.test(all_trans_ment$total_energy, all_trans_ment$rsbtotal_mean) # 0.13
+
+lmer.rsb <- lmer(total_energy ~ rsbtotal_mean + site_shell + Scan_age_wpm + Scan_age_gmc #+ vr_age 
+                 + (1 | id), REML= FALSE, data = all_trans_ment%>% filter(total_energy > 2000))
+summary(lmer.rsb)
+
+
+
+
+```
+sensitivity
+```{r}
+mullen$session <- mullen$age
+
+all_trans_ment <- merge(all_trans_ment, mullen, by = c("id", "session"), all.x = TRUE)
+
+ggplot(aes(x = total_energy, y = fm_ae), data = all_trans_ment) +
+  geom_point() +
+  geom_smooth(method = 'lm', se = FALSE) +
+  theme_minimal() +
+  xlab("Total Energy") +
+  ylab("fine motor") +
+  ggtitle("Energy Required to Activate ment and Fine Motor Scores")
+
+lmer.rsb <- lmer(total_energy ~ fm_ae + site_shell + (1 | id), REML= FALSE, data = all_trans_ment)
+summary(lmer.rsb)
+cor.test(all_trans_ment$total_energy, all_trans_ment$fm_ae) #0.19
+
+cor.test(all_trans_ment$rsbtotal_mean, all_trans_ment$fm_ae) #0.19
+
+lmer.fmr <- lmer(fm_ae ~ rsbtotal_mean + site_shell + (1 | id), REML= FALSE, data = all_trans_ment)
+summary(lmer.fmr)
+
+
+lmer.rl <- lmer(total_energy ~ rl_ae + site_shell + q + (1 | id), REML= FALSE, data = all_trans_ment)
+summary(lmer.rl)
+
+pred_df_ment_rl <- ggpredict(lmer.rl, terms = c("rl_ae"))
+ment_rl <- plot_en_beh(og_df = all_trans_ment, pred_df = pred_df_ment_rl, 
+                        beh = "rl_ae", color = other_colors["Soc Cog"], 
+                        xlab = "Receptive Language T-Score", 
+                        title = "Receptive Language & \n Social Cognition State Energy")
+
+
+lmer.el <- lmer(total_energy ~ el_ae + site_shell + q + (1 | id), REML= FALSE, data = all_trans_ment)
+summary(lmer.el)
+pred_df_ment_el <- ggpredict(lmer.el, terms = c("el_ae"))
+ment_el <- plot_en_beh(og_df = all_trans_ment, pred_df = pred_df_ment_el, 
+                        beh = "el_ae", color = other_colors["Soc Cog"], 
+                        xlab = "Expressive Language T-Score", 
+                        title = "Expressive Language & \n Social Cognition State Energy")
+
+
+
+```
+
+
+# energy tradeoff
+som/soc cog
+```{r}
+all_trans_ment2 <- rbind(all_trans_ment[, 1:8] %>% mutate(network = "Ment"),
+                         all_trans_som[, 1:8] %>% mutate(network = "Som"),
+                         all_trans_lang[, 1:8] %>% mutate(network = "Lang"),
+                         all_trans_vis[, 1:8] %>% mutate(network = "Vis"))
+
+all_trans_ment2 <- merge(all_trans_ment2, vrrsb_avg, by = c("id"), all.x = TRUE)
+
+all_trans_ment2 <- all_trans_ment2 %>%
+  pivot_wider(
+    names_from = network,
+    values_from = total_energy
+  ) %>%
+  mutate(
+    ment_minus_som = Ment - Som,
+    ment_minus_sal = Ment - Lang,
+    ment_minus_vis = Ment - Vis
+  ) %>%
+  arrange(id, Scan_Age) %>%
+  group_by(id) %>%
+  mutate(
+    change_energy_ment = last(Ment) - first(Ment)
+  ) %>%
+  ungroup()
+
+ all_trans_ment2$ment_above_som <- ifelse(all_trans_ment2$ment_minus_som > 0, 1, 0)
+ 
+  hist(all_trans_ment2$ment_minus_sal) # some higher, others lower
+hist(all_trans_ment2$rsbtotal_mean)
+
+
+
+# the greater ment is relative to som, the higher rbs --the greater som is relative ot ment, better reciprocal social behav
+lmer.rsb <- lmer(ment_minus_som  ~ Scan_Age + site_shell#~ ment_minus_som  rsbtotal_mean
+                 + (1 | id), REML= FALSE, data = all_trans_ment2)
+summary(lmer.rsb)
+
+lmer.rsb <- lmer(ment_minus_som  ~ Scan_Age + rsbtotal_mean + site_shell + q #~ ment_minus_som  rsbtotal_mean
+                 + (1 | id), REML= FALSE, data = all_trans_ment2)
+summary(lmer.rsb)
+
+# ment - lang
+lmer.rsb <- lmer(ment_minus_sal ~ Scan_Age + rsbtotal_mean + site_shell + q #~ ment_minus_som  rsbtotal_mean
+                 + (1 | id), REML= FALSE, data = all_trans_ment2)
+summary(lmer.rsb)
+
+
+pred_df_mms <- ggpredict(lmer.rsb, terms = c("rsbtotal_mean"))
+hist(pred_df_mms$predicted)
+
+
+# holding age at average for histo
+age_const <- mean(all_trans_ment2$Scan_Age, na.rm = TRUE)
+moddat <- model.frame(lmer.rsb)
+moddat$Scan_Age <- mean(moddat$Scan_Age, na.rm = TRUE)
+moddat$pred <- predict(
+  lmer.rsb,
+  newdata = moddat,
+  re.form = NA
+)
+
+all_trans_ment2
+
+# plots
+# trade_hist <- ggplot(aes(x = ment_minus_som), data = all_trans_ment2) +
+trade_hist <- ggplot(aes(x = pred), data = moddat) +
+  geom_histogram(aes(fill = pred > 0), alpha = 0.7) +
+    # geom_histogram(aes(fill = ment_minus_som > 0), alpha = 0.7) +
+  scale_fill_manual(
+    values = c("FALSE" = unname(other_colors["Soc Cog"]), "TRUE" = unname(network_colors["SOM"])),
+    labels = c("FALSE" = "Somatomotor Energy > Social Cognition Energy", 
+               "TRUE" = "Social Cognition Energy > Somatomotor Energy"),
+    name = NULL
+  ) +
+  theme_minimal() +
+  geom_vline(xintercept = 0, linetype = "dashed", color = "grey") +
+  xlab("Social Cognition State Energy - Somatomotor State Energy") +
+  annotate(
+    "text",
+    x = -40, y = 30,
+    label = "Social cognition \n state prioritized",
+    hjust = -0.01, vjust = 0.3,
+    color = unname(other_colors["Soc Cog"]),
+    size = 3
+  ) +
+  annotate(
+    "text",
+    x = 40, y = 30, #160
+    label = "Somatomotor \n state prioritized",
+    hjust = 1.05, vjust = 0.3,
+    color = unname(network_colors["SOM"]),
+    size = 3
+  ) +
+  annotate(
+    "text",
+    x = 0, y = 45,
+    label = "Equal Priority",
+    hjust = 0.5, vjust = 0.5,
+    color = "black",
+    size = 3
+  ) +
+  theme(legend.position = "none",
+        axis.title.x = element_text(size = 9),
+        axis.title.y = element_text(size = 9),
+        axis.text.x  = element_text(size = 8),
+        axis.text.y  = element_text(size = 8),
+        plot.title   = element_text(size = 10, hjust = 0.5)) +
+  ggtitle("Social Cognition/Somatomotor Energy Tradeoffs \n at the Sample Average Age")
+
+som2 <- brain_net("SomMot")
+
+trade_hist <- trade_hist +
+  inset_element(
+    som2,
+    left = 0.68,
+    bottom = 0.78,
+    right = 0.99,
+    top = 0.99,
+    ignore_tag = TRUE
+  ) +
+  inset_element(
+    ment2,
+    left = 0.01,
+    bottom = 0.78,
+    right = 0.30,
+    top = 0.99,
+    ignore_tag = TRUE
+  )
+
+trade_hist <- wrap_elements(full = trade_hist)
+
+trade_plot <- ggplot(all_trans_ment2, aes(x = rsbtotal_mean, y = ment_minus_som)) +
+  geom_point(alpha = 0.3, aes(color = ment_minus_som > 0)) +
+  geom_ribbon(
+    data = pred_df_mms,
+    aes(x = x, ymin = conf.low, ymax = conf.high),
+    fill = "black",
+    alpha = 0.1,
+    inherit.aes = FALSE
+  ) +
+  geom_line(
+    data = pred_df_mms,
+    aes(x = x, y = predicted),
+    color = "black",
+    linewidth = 1.2
+  ) +
+  scale_color_manual(
+    values = c("FALSE" = unname(other_colors["Soc Cog"]), "TRUE" = unname(network_colors["SOM"])),
+    labels = c("FALSE" = "Somatomotor Energy >\n Social Cognition Energy", 
+               "TRUE" = "Social Cognition Energy >\n Somatomotor Energy"),
+    name = NULL
+  ) +
+  geom_hline(yintercept = 0, color = "black", linetype = "dashed") +
+  theme_minimal() +
+  theme(
+    axis.title.x = element_text(size = 9),
+    axis.title.y = element_text(size = 9),
+    axis.text.x  = element_text(size = 8),
+    axis.text.y  = element_text(size = 8),
+    plot.title   = element_text(size = 10, hjust = 0.5),
+    legend.position = "none"
+  ) +
+  annotate(
+    "text",
+    x = Inf, y = 150,
+    label = "Somatomotor \n state prioritized",
+    hjust = 1.05, vjust = 1.2,
+    color = unname(network_colors["SOM"]),
+    size = 3
+  ) +
+  annotate(
+    "text",
+    x = Inf, y = -180,
+    label = "Social cognition \n state prioritized",
+    hjust = 1.05, vjust = -1.2,
+    color = unname(other_colors["Soc Cog"]),
+    size = 3
+  ) +
+  xlab("Reciprocal Social Behavior Total Score") +
+  ylab("Social Cognition - Somatomotor Energy") +
+  ggtitle("Social Cognition/Somatomotor Energy Tradeoffs & \n Reciprocal Social Behavior Holding Age Constant")
+
+
+# wrap_elements(trade_hist) + wrap_elements(trade_dev) +
+# wrap_elements(trade_plot) +
+#Figure 5
+trade_slopes + trade_dev + trade_hist  + trade_plot + 
+  plot_layout(ncol = 2, guides = "collect") +
+  plot_annotation(
+    title = "Developmental Tradeoffs in Brain State Energy",
+    tag_levels = "A", 
+    theme = theme(
+      plot.title = element_text(hjust = 0.5, size = 14, face = "bold"),
+      plot.tag = element_text(size = 12, face = "bold")
+    )
+  ) 
+
+library(patchwork)
+ggsave(file.path(fig_dir, "Fig5_trade2.jpeg"), width = 9, height =6, dpi = 300)
+
+```
+
+
+all soc cog plot
+```{r}
+all_ment <- (ment_rsb)/
+  (ment_el)/
+  (ment_rl) +
+  plot_annotation(title = "Behavioral Associations with Social Cognition State Energy",
+                  theme = theme(
+                    plot.title = element_text(
+                      hjust = 0.5,     # center
+                      size = 14,
+                      face = "bold"
+                    )
+                  ))
+all_ment
+
+ggsave(file.path(fig_dir, "Fig4_ment_beh.jpeg"), width = 6, height =10, dpi = 300)
+
+```
+
+Figure 4
+```{r}
+ 
+(all_lang | all_ment | all_con) +
+  plot_annotation(
+    tag_levels = "A",
+    theme = theme(
+      plot.title = element_text(hjust = 0.5, size = 10, face = "bold"),
+      plot.tag = element_text(size = 12, face = "bold")
+    )
+  ) 
+  
+ ggsave(file.path(fig_dir, "Fig4_beh.jpeg"), height = 8, width = 12)
+```
+
+
+
+## Transitioning to DMN state
+Distributions
+```{r}
+
+# all transitions completed 
+any(grepl("False", all_trans_dmn$inversion_error))
+any(grepl("False", all_trans_dmn$reconstruction_error))
+
+hist(all_trans_dmn$total_energy)
+
+hist(all_trans_dmn$energy)
+hist(log(all_trans_dmn$energy))
+
+summary(all_trans_dmn$energy)
+
+all_trans_dmn$energy_log <- log1p(all_trans_dmn$energy)
+
+ggplot(aes(x = energy, color = network, fill = network),
+       data = all_trans_dmn %>% filter(id %in% sample(unique(all_trans_dmn$id), 20))) +
+  geom_histogram() +
+  facet_wrap(~ factor(id)) +
+  theme_minimal() 
+
+
+ggplot(aes(x = network, y = energy_log), data = all_trans_dmn) +
+  geom_jitter(aes( color = network), alpha = 0.4) +
+     geom_violin() +
+    stat_summary(fun = median, geom = "crossbar", 
+               width = 0.5, color = "black", 
+               fatten = 2, size = 0.6) +
+  ylab("Energy (log)") +
+  theme_minimal() +
+  ggtitle("Total Energy Required to Activate DMN")
+ggsave(file.path(fig_dir, "dmn_energy_vio.jpeg"))
+
+
+ggplot(aes(x = Scan_Age, y = total_energy), data = all_trans_dmn) +
+  geom_point() +
+  geom_smooth(method = "lm", se = FALSE) +
+  theme_minimal() +
+  ylab("Total Energy") +
+  xlab("Age (months)") +
+  ggtitle("Total Energy Required to Activate DMN Over Development")
+ggsave(file.path(fig_dir, "dmn_energy_dev.jpeg"))
+
+
+dmn <- plot_dev_energy(og_df = all_trans_dmn, pred_df =  pred[pred$group %in% "DMN", ], 
+                net = "DMN", net_lab = "Default Mode Network", sig_label = "*") + coord_cartesian(ylim = ylims)
+
+dmn2 <- brain_net("Default")
+
+dmn3 <-dmn +
+  inset_element(
+    dmn2,
+    left = 0.78,
+    bottom = 0.78,
+    right = 0.99,
+    top = 0.99,   
+    ignore_tag = TRUE
+  )
+
+```
+
+
+### Associations with vrrsb
+
+associations
+```{r}
+
+all_trans_dmn <- merge(all_trans_dmn, vrrsb_avg, by = c("id"), all.x = TRUE)
+
+ggplot(aes(x = total_energy),  data = all_trans_dmn) +
+  geom_histogram() +
+  theme_minimal() +
+  xlab("Total Energy") +
+  ggtitle("Total Energy Required to Activate DMN")
+
+df_default <- all_trans_dmn %>%
+  filter(network == "Default")
+
+df_vis <- all_trans_dmn %>%
+  filter(network == "Vis")
+
+hist(all_trans_dmn$social_comm_mean)
+
+hist(vrrsb$videorefscore)
+
+# video-referenced score
+ggplot(aes(x = total_energy, y = videorefscore_mean), data = all_trans_dmn ) +
+  geom_point() +
+  geom_smooth(method = 'lm', se = FALSE) +
+  theme_minimal() +
+  xlab("Total Energy") +
+  ylab("Mean Video Reference Score") +
+  ggtitle("Total Energy Required to Activate DMN and vrScore mean")
+ggsave(file.path(fig_dir, "dmn_energy_vref.jpeg"))
+
+cor.test(all_trans_dmn$total_energy, all_trans_dmn$videorefscore_mean) # 0.13
+lmer.vr<- lmer(total_energy ~ rsbtotal_mean + site_shell + (1 | id), REML= FALSE, data = all_trans_dmn)
+summary(lmer.vr)
+
+
+ggplot(aes(x = energy_log, y = videorefscore_mean), data = all_trans_dmn ) +
+    facet_wrap(~network, ncol = 3) +
+  geom_point() +
+  geom_smooth(method = 'lm', se = FALSE) +
+  theme_minimal()
+ggsave(file.path(fig_dir, "dmn_energy_network_vref.jpeg"))
+
+
+ggplot(aes(x = energy, y = videorefscore_mean), data = all_trans_dmn %>% 
+         filter(network == "Default")) +
+    facet_wrap(~network) +
+  geom_point() +
+  geom_smooth(method = 'lm', se = FALSE) +
+  theme_minimal()
+cor.test(df_default$energy_log, df_default$videorefscore_mean) # 0.045
+cor.test(df_vis$energy_log, df_vis$videorefscore_mean) # -0.12
+
+
+ggplot(aes(x = energy, y = videorefscore_mean), data = all_trans_dmn %>% 
+         filter(network == "Vis")) +
+    facet_wrap(~network) +
+  geom_point() +
+  geom_smooth(method = 'lm', se = FALSE) +
+  theme_minimal()
+
+
+```
+
+```{r}
+# rsb total
+ggplot(aes(x = total_energy, y = rsbtotal_mean), data = all_trans_dmn) +
+  geom_point() +
+  geom_smooth(method = 'lm', se = FALSE) +
+  theme_minimal() +
+  xlab("Total Energy") +
+  ylab("RSB Total Score (mean)") +
+  ggtitle("Energy Required to Activate DMN and RSB Total Score")
+ggsave(file.path(fig_dir, "dmn_energy_rsbtot.jpeg"))
+cor.test(all_trans_dmn$total_energy, all_trans_dmn$rsbtotal_mean) # 0.13
+
+lmer.rsb <- lmer(total_energy ~ rsbtotal_mean + site_shell + (1 | id), REML= FALSE, data = all_trans_dmn)
+summary(lmer.rsb)
+
+vc_df <- as.data.frame(VarCorr(lmer.rsb))
+between_var <- vc_df$vcov[vc_df$grp == "id" & vc_df$var1 == "(Intercept)"]
+within_var  <- vc_df$vcov[vc_df$grp == "Residual"]
+between_var / (between_var + within_var)
+
+
+```
+
+
+```{r}
+
+
+
+all_trans_dmn <- merge(all_trans_dmn, mullen, by = c("id", "session"), all.x = TRUE)
+
+ggplot(aes(x = total_energy, y = fm_ae), data = all_trans_dmn) +
+  geom_point() +
+  geom_smooth(method = 'lm', se = FALSE) +
+  theme_minimal() +
+  xlab("Total Energy") +
+  ylab("fine motor") +
+  ggtitle("Energy Required to Activate DMN and Fine Motor Scores")
+
+lmer.rsb <- lmer(total_energy ~ fm_ae + site_shell + (1 | id), REML= FALSE, data = all_trans_dmn)
+summary(lmer.rsb)
+cor.test(all_trans_dmn$total_energy, all_trans_dmn$fm_ae) #0.19
+
+
+lmer.rsb <- lmer(total_energy ~ el_ae + site_shell + (1 | id), REML= FALSE, data = all_trans_dmn)
+summary(lmer.rsb)
+
+```
+
+
+
+
+
+## All developmental changes in energy
+
+
+
+plot with row labels
+```{r} 
+library(patchwork)
+
+library(patchwork)
+library(grid)
+lab1 <- wrap_elements(
+  full = textGrob("Developmental Decreases in Energy Requirements",
+                  gp = gpar(fontsize = 16)),
+  ignore_tag = TRUE
+)
+
+lab2 <- wrap_elements(
+  full = nullGrob(),
+  ignore_tag = TRUE
+)
+
+lab3 <- wrap_elements(
+  full = textGrob("No Developmental Change in Energy Requirements",
+                  gp = gpar(fontsize = 16)),
+  ignore_tag = TRUE
+)
+
+lab4 <- wrap_elements(
+  full = textGrob("Developmental Increases in Energy Requirements",
+                  gp = gpar(fontsize = 16)),
+  ignore_tag = TRUE
+)
+
+final_plot <-
+  lab1 / (lang3 + ment3) /
+  lab2 / (dmn3 + dorsa3) /
+  lab3 / (SAL3 + con3) /
+  lab4 / (som3 + VIS3) +
+  plot_layout(heights = c(0.08, 1, 0.08, 1, 0.08, 1, 0.08, 1)) +
+  plot_annotation(
+    # title = "Developmental Changes in Energy Required to Activate Brain States",
+    tag_levels = "A",
+    theme = theme(
+      plot.title = element_text(hjust = 0.5, size = 14, face = "bold"),
+      plot.tag = element_text(size = 12, face = "bold")
+    )
+  )
+
+final_plot
+
+ggsave(file.path(fig_dir, "Fig5_dev_change.jpeg"), width = 12, height = 16, dpi = 300)
+
+```
+
+
+# All control-behavior correlations
+
+```{r}
+
+any(duplicated(paste(all_beh$id, all_beh$age, all_beh$item)))
+
+all_beh <- all_beh %>% 
+  arrange(id, age)
+
+all_trans <- rbind(all_trans_con[, 1:7] %>% mutate(network = "Cont"),
+                   all_trans_dmn %>% mutate(network = "DMN"),
+                   all_trans_vis %>% mutate(network = "VIS"),
+                   all_trans_dorsa %>% mutate(network = "DorsalAttn"),
+                   all_trans_lang[, 1:7] %>% mutate(network = "Lang"),
+                   all_trans_ment[, 1:7] %>% mutate(network = "Soc Cog"),
+                   all_trans_sal %>% mutate(network = "SalVent"),
+                   all_trans_som %>% mutate(network = "Som")) %>%
+  arrange(id, session)
+
+all_trans <- merge(
+  all_trans,
+  all_beh %>% select(id, session = age, item, score, measure),
+  by = c("id", "session")
+)
+all_trans <- all_trans[!is.na(all_trans$item), ]
+
+length(unique(all_trans$id)) # 141
+
+corr_by_item_network <- all_trans %>%
+  group_by(measure, item, network) %>%
+  summarise(
+    r = cor(total_energy, score, use = "pairwise.complete.obs"),
+    p = cor.test(total_energy, score)$p.value,
+    n = sum(!is.na(total_energy) & !is.na(score)),
+    .groups = "drop"
+  ) %>%
+  group_by(network) %>%
+  mutate(
+    p_fdr = p.adjust(p, method = "fdr")
+  ) %>%
+  ungroup()
+
+
+library(ggplot2)
+
+ggplot(corr_by_item_network, aes(x = network, y = item, fill = r)) +
+  geom_tile(color = "white") +
+  geom_text(
+    aes(label = ifelse(!is.na(p_fdr) & p_fdr < 0.05, "*", "")),
+    size = 5
+  ) +
+  facet_grid(measure ~ ., scales = "free_y", space = "free_y") +
+  scale_fill_gradient2(
+    high = "#4575B4", mid = "white", low = "#D73027",
+    limits = c(-1, 1),
+    name = "r"
+  ) +
+  theme_minimal() +
+  theme(
+    axis.text.x = element_text(angle = 45, hjust = 1),
+    axis.title = element_blank(),
+    strip.text.y = element_text(angle = 0, face = "bold")  #
+  ) +
+  xlab("Energy Required to Activate Brain State") +
+  ylab("Behavior") +
+  ggtitle("Correlations Between Brain State Energies and Behavior")
+ggsave(file.path(fig_dir, "Fig5_beh_en_corr.jpeg"), width = 10, height = 7)
+```
+
+
+

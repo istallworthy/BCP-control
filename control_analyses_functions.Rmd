@@ -1,0 +1,296 @@
+---
+title: "control_analyses_functions"
+output: html_document
+date: "2025-12-09"
+---
+
+```{r setup, include=FALSE}
+knitr::opts_chunk$set(echo = TRUE)
+```
+
+Read in behavior files 
+```{r}
+library(rlang)
+
+read_beh <- function(beh_dir, file, cols){
+  beh <- read.delim(file.path(beh_dir, file))
+  if(!any(cols %in% colnames(beh))){
+    stop("Variables are not in data")
+  }
+    
+beh <- beh %>%
+  transmute( #keeps only cols you create
+    id  = src_subject_id,
+    age = interview_age,
+    !!! set_names(syms(unlist(cols)), names(cols))
+  )
+
+  beh <- beh[2:nrow(beh), ] %>%
+    arrange(id, age)
+  beh <- beh[!duplicated(paste0(beh$id, beh$age)), ]
+  
+  beh <- lapply(beh, function(x) as.numeric(gsub('[\\""]', '', x)))
+  beh <- as.data.frame(beh) %>%
+    arrange(id, age)
+  beh
+}
+```
+
+Make cfa model
+```{r}
+
+get_cfa_model <- function(behav_clean){
+  
+  vars <- setdiff(names(behav_clean), c("id"))  # drop id or other non-item variables
+  
+  item_info <- tibble(var = vars) %>%
+    mutate(
+      bin       = str_extract(var, "(?<=_)[^_]+$"),     # text after last "_"
+      item_base = str_remove(var, "_[^_]+$")           # everything before last "_"
+    )%>%
+    mutate(
+      bin_start = as.numeric(str_extract(bin, "^[0-9\\.]+"))
+    ) %>%
+    arrange(bin_start) %>%
+    filter(bin %in% bins_test)
+  
+  bins <- unique(item_info$bin)
+  bins <- bins[bins %in% bins_test]
+  
+  
+  # make model
+  measurement_lines <- lapply(seq_along(bins), function(i) {
+    this_bin  <- bins[i]
+    vars_here <- item_info$var[item_info$bin == this_bin]
+    paste0("F", i, " =~ ", paste(vars_here, collapse = " + "))
+  })
+  measurement_part <- paste(measurement_lines, collapse = "\n")
+  print(measurement_lines)
+  
+  
+  structural_lines <- lapply(2:length(bins), function(i) {
+    paste0("F", i, " ~ F", i - 1)
+  })
+  structural_part <- paste(structural_lines, collapse = "\n")
+  print(structural_lines)
+  
+  
+  anchors <- item_info %>%
+    group_by(item_base) %>%
+    filter(n() > 1) %>%
+    pull(item_base) %>%
+    unique()
+  anchor_lines <- c()
+  for (a in anchors) {
+    this <- item_info %>% filter(item_base == a)
+    label <- paste0("l_", a)  # e.g., l_mefs_item1
+    
+    for (i in seq_len(nrow(this))) {
+      # which factor corresponds to this bin?
+      f_index <- which(bins == this$bin[i])
+      anchor_lines <- c(
+        anchor_lines,
+        paste0("F", f_index, " =~ ", label, "*", this$var[i])
+      )
+    }
+  }
+  anchor_part <- paste(anchor_lines, collapse = "\n")
+  print(anchor_lines)
+  
+  model <- paste(
+    "# MEASUREMENT MODEL",
+    measurement_part,
+    "",
+    "# STRUCTURAL LINKS",
+    structural_part,
+    "",
+    "# (OPTIONAL) ANCHOR INVARIANCE",
+    anchor_part,
+    sep = "\n"
+  )
+  
+  model
+}
+
+```
+
+Dev plot 
+```{r}
+# plots predicted developmental changes in energy for a network 
+
+plot_dev_energy <- function(og_df, pred_df, net, net_lab, sig_label = NULL){
+  
+  network_colors <- c(network_colors, other_colors)
+  x_mid <- mean(range(pred_df$x, na.rm = TRUE))
+
+  p <-  ggplot(og_df, aes(x = Scan_Age, y = total_energy)) +
+    geom_point(alpha = 0.3, color = network_colors[net]) + # keep original data
+    geom_ribbon(
+      data = pred_df,
+      aes(x = x, ymin = conf.low, ymax = conf.high),
+      fill = network_colors[net],
+      alpha = 0.1,
+      inherit.aes = FALSE
+    ) +
+    geom_line(
+      data = pred_df,
+      aes(x = x, y = predicted),
+      color = network_colors[net],
+      linewidth = 1.2
+    ) +
+    {if(!is.null(sig_label)) 
+    annotate("text",
+         x = x_mid,
+         y = Inf,
+         label = sig_label,
+         vjust = 2,        # push down from top
+         hjust = 0.5,      # center horizontally
+         size = 6,
+         fontface = "bold")
+    } +
+    
+    theme_minimal() +
+    theme(
+      axis.title.x = element_text(size = 12),
+      axis.title.y = element_text(size = 12),
+      axis.text.x  = element_text(size = 12),
+      axis.text.y  = element_text(size = 12),
+      plot.title   = element_text(size = 13, face = "bold")
+    ) +
+    xlab("Age (mo)") +
+    ylab("Control Energy") +
+    ggtitle(sprintf("Activate %s Brain State", net_lab))
+  
+  print(p)
+  
+  p
+  
+}
+
+```
+
+network brain plot
+```{r}
+brain_vec <- function(region_vec, fill_col) {
+  
+  atlas_df <- schaefer7_100$data %>%
+    left_join(region_vec, by = "region") %>%
+    dplyr::filter(hemi == "left", side == "lateral")
+   atlas_df$values[is.na(atlas_df$values)] <- 0
+   atlas_df$values <- as.factor( atlas_df$values)
+  
+  # if (length(region_vec) != nrow(atlas_df)) {
+  #   stop("region_vec must have length ", nrow(atlas_df),
+  #        " for left-lateral schaefer7_100$data")
+  # }
+  
+  atlas_df$fill_grp <- atlas_df$values
+  
+  p <- ggplot(atlas_df) +
+    geom_sf(
+      aes(geometry = geometry, fill = fill_grp),
+      color = "grey60",
+      linewidth = 0.25
+    ) +
+    scale_fill_manual(
+      values = c(
+        "0" = "grey85",
+        "1"  = fill_col
+      ),
+      guide = "none"
+    ) +
+    theme_void()
+  
+  p
+}
+
+  
+  
+  
+  
+
+brain_net <- function(net) {
+  
+  net_key <- c(
+    "Vis"         = "Vis",
+    "SomMot"      = "SoM",
+    "DorsAttn"    = "DorsAttn",
+    "SalVentAttn" = "SalVentAttn",
+    "Limbic"      = "Limbic",
+    "Cont"        = "Cont",
+    "Default"     = "DMN"
+  )[net]
+  
+  # net_key <- net
+  
+  fill_vals <- c("Other" = "grey85", network_colors[net_key])
+  names(fill_vals)[2] <- net
+  
+ p <- schaefer7_100$data %>%
+    filter(hemi == "left", side == "lateral") %>%
+    ggplot() +
+    geom_sf(
+      aes(
+        geometry = geometry,
+        fill = ifelse(str_detect(region, net), net, "Other")
+      ),
+      color = "grey60",
+      linewidth = 0.25
+    ) +
+    scale_fill_manual(
+      values = fill_vals,
+      guide = "none"
+    ) +
+    theme_void()
+ p
+}
+```
+
+Plot energy-behavior
+```{r}
+
+plot_en_beh <- function(og_df, pred_df, beh, color, xlab, title, sig_label = NULL){
+  
+   x_mid <- mean(range(pred_df$x, na.rm = TRUE))
+  
+  ggplot(og_df, aes(x = .data[[beh]], y = total_energy)) +
+    geom_point(alpha = 0.3, color = color) +
+    geom_ribbon(
+      data = pred_df,
+      aes(x = x, ymin = conf.low, ymax = conf.high),
+      fill = color,
+      alpha = 0.1,
+      inherit.aes = FALSE
+    ) +
+    geom_line(
+      data = pred_df,
+      aes(x = x, y = predicted),
+      color = color,
+      linewidth = 1.2
+    ) +
+    {if(!is.null(sig_label)) 
+    annotate("text",
+         x = x_mid,
+         y = Inf,
+         label = sig_label,
+         vjust = 2,        # push down from top
+         hjust = 0.5,      # center horizontally
+         size = 6,
+         fontface = "bold")
+    } +
+    theme_minimal() +
+    theme(
+      axis.title.x = element_text(size = 12),
+      axis.title.y = element_text(size = 12),
+      axis.text.x  = element_text(size = 12),
+      axis.text.y  = element_text(size = 12),
+      plot.title   = element_text(size = 13, face = "bold", hjust = 0.5)
+    ) +
+    xlab(xlab) +
+    ylab("Control Energy") +
+    ggtitle(title)
+}
+```
+
+
+
